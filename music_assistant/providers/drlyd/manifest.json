@@ -1,0 +1,9 @@
+{
+  "type": "music",
+  "domain": "drlyd",
+  "name": "DR Lyd",
+  "description": "Support for DR Lyd [Denmark] Radio and Podcast streaming provider in Music Assistant",
+  "codeowners": ["@yourgithubusername"],
+  "requirements": [],
+  "documentation": ""
+}
