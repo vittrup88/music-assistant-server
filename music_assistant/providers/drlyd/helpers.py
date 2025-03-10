@@ -170,10 +170,10 @@ class SeriesEpisodeResult(DataClassDictMixin):
 
     # Optional
     next: str | None = field(
-        default=None, metadata=field_options(alias="learnId")
+        default=None, metadata=field_options(alias="next")
     )  # next url - paginate
     prev: str | None = field(
-        default=None, metadata=field_options(alias="learnId")
+        default=None, metadata=field_options(alias="prev")
     )  # prev url - paginate
 
 
