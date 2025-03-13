@@ -30,7 +30,8 @@ from music_assistant_models.player_queue import PlayLogEntry
 
 from music_assistant.constants import (
     ANNOUNCE_ALERT_FILE,
-    CONF_ALLOW_MEMORY_CACHE,
+    CONF_ALLOW_AUDIO_CACHE,
+    CONF_AUDIO_CACHE_MAX_SIZE,
     CONF_BIND_IP,
     CONF_BIND_PORT,
     CONF_CROSSFADE,
@@ -45,7 +46,8 @@ from music_assistant.constants import (
     CONF_VOLUME_NORMALIZATION_FIXED_GAIN_TRACKS,
     CONF_VOLUME_NORMALIZATION_RADIO,
     CONF_VOLUME_NORMALIZATION_TRACKS,
-    DEFAULT_ALLOW_MEMORY_CACHE,
+    DEFAULT_ALLOW_AUDIO_CACHE,
+    DEFAULT_AUDIO_CACHE_MAX_SIZE,
     DEFAULT_PCM_FORMAT,
     DEFAULT_STREAM_HEADERS,
     ICY_HEADERS,
@@ -63,7 +65,13 @@ from music_assistant.helpers.audio import (
 )
 from music_assistant.helpers.ffmpeg import LOGGER as FFMPEG_LOGGER
 from music_assistant.helpers.ffmpeg import check_ffmpeg_version, get_ffmpeg_stream
-from music_assistant.helpers.util import get_ip, get_ips, select_free_port, try_parse_bool
+from music_assistant.helpers.util import (
+    clean_old_files,
+    get_ip,
+    get_ips,
+    select_free_port,
+    try_parse_bool,
+)
 from music_assistant.helpers.webserver import Webserver
 from music_assistant.models.core_controller import CoreController
 from music_assistant.models.plugin import PluginProvider
@@ -107,11 +115,20 @@ class StreamsController(CoreController):
         )
         self.manifest.icon = "cast-audio"
         self.announcements: dict[str, str] = {}
+        # create cache dir if needed
+        self._audio_cache_dir = audio_cache_dir = os.path.join(self.mass.cache_path, ".audio")
+        if not os.path.isdir(audio_cache_dir):
+            os.makedirs(audio_cache_dir)
 
     @property
     def base_url(self) -> str:
         """Return the base_url for the streamserver."""
         return self._server.base_url
+
+    @property
+    def audio_cache_dir(self) -> str:
+        """Return the directory where audio cache files are stored."""
+        return self._audio_cache_dir
 
     async def get_config_entries(
         self,
@@ -198,16 +215,36 @@ class StreamsController(CoreController):
                 required=False,
             ),
             ConfigEntry(
-                key=CONF_ALLOW_MEMORY_CACHE,
-                type=ConfigEntryType.BOOLEAN,
-                default_value=DEFAULT_ALLOW_MEMORY_CACHE,
-                label="Allow (in-memory) caching of audio streams",
-                description="To ensure smooth playback as well as fast seeking, "
-                "Music Assistant by default caches audio streams (in memory). "
-                "On systems with limited memory, this can be disabled, "
-                "but may result in less smooth playback.",
+                key=CONF_ALLOW_AUDIO_CACHE,
+                type=ConfigEntryType.STRING,
+                default_value=DEFAULT_ALLOW_AUDIO_CACHE,
+                options=[
+                    ConfigValueOption("Always", "always"),
+                    ConfigValueOption("Disabled", "disabled"),
+                    ConfigValueOption("Auto", "auto"),
+                ],
+                label="Allow caching of remote/cloudbased audio streams",
+                description="To ensure smooth(er) playback as well as fast seeking, "
+                "Music Assistant can cache audio streams on disk. \n"
+                "On systems with limited diskspace, this can be disabled, "
+                "but may result in less smooth playback or slower seeking.\n\n"
+                "**Always:** Enforce caching of audio streams at all times "
+                "(as long as there is enough free space)."
+                "**Disabled:** Never cache audio streams.\n"
+                "**Auto:** Let Music Assistant decide if caching "
+                "should be used on a per-item base.",
                 category="advanced",
-                required=False,
+                required=True,
+            ),
+            ConfigEntry(
+                key=CONF_AUDIO_CACHE_MAX_SIZE,
+                type=ConfigEntryType.INTEGER,
+                default_value=DEFAULT_AUDIO_CACHE_MAX_SIZE,
+                label="Maximum size of audio cache",
+                description="The maximum amount of diskspace (in GB) "
+                "the audio cache may consume (if enabled).",
+                range=(1, 50),
+                category="advanced",
             ),
         )
 
@@ -218,6 +255,7 @@ class StreamsController(CoreController):
         FFMPEG_LOGGER.setLevel(self.logger.level)
         # perform check for ffmpeg version
         await check_ffmpeg_version()
+        await self._clean_audio_cache()
         # start the webserver
         self.publish_port = config.get_value(CONF_BIND_PORT)
         self.publish_ip = config.get_value(CONF_PUBLISH_IP)
@@ -315,12 +353,20 @@ class StreamsController(CoreController):
                 )
                 queue_item.available = False
                 raise web.HTTPNotFound(reason=f"No streamdetails for Queue item: {queue_item_id}")
+
+        # pick pcm format based on the streamdetails and player capabilities
+        pcm_format = AudioFormat(
+            content_type=DEFAULT_PCM_FORMAT.content_type,
+            sample_rate=queue_item.streamdetails.audio_format.sample_rate,
+            bit_depth=DEFAULT_PCM_FORMAT.bit_depth,
+            channels=2,
+        )
         # work out output format/details
         output_format = await self.get_output_format(
             output_format_str=request.match_info["fmt"],
             player=queue_player,
-            default_sample_rate=queue_item.streamdetails.audio_format.sample_rate,
-            default_bit_depth=queue_item.streamdetails.audio_format.bit_depth,
+            content_sample_rate=pcm_format.sample_rate,
+            content_bit_depth=pcm_format.bit_depth,
         )
 
         # prepare request, add some DLNA/UPNP compatible headers
@@ -359,13 +405,6 @@ class StreamsController(CoreController):
             queue.display_name,
         )
 
-        # pick pcm format based on the streamdetails and player capabilities
-        pcm_format = AudioFormat(
-            content_type=DEFAULT_PCM_FORMAT.content_type,
-            sample_rate=queue_item.streamdetails.audio_format.sample_rate,
-            bit_depth=DEFAULT_PCM_FORMAT.bit_depth,
-            channels=2,
-        )
         chunk_num = 0
 
         # inform the queue that the track is now loaded in the buffer
@@ -425,8 +464,8 @@ class StreamsController(CoreController):
         output_format = await self.get_output_format(
             output_format_str=request.match_info["fmt"],
             player=queue_player,
-            default_sample_rate=flow_pcm_format.sample_rate,
-            default_bit_depth=flow_pcm_format.bit_depth,
+            content_sample_rate=flow_pcm_format.sample_rate,
+            content_bit_depth=flow_pcm_format.bit_depth,
         )
         # work out ICY metadata support
         icy_preference = self.mass.config.get_raw_player_config_value(
@@ -615,8 +654,7 @@ class StreamsController(CoreController):
         output_format = await self.get_output_format(
             output_format_str=request.match_info["fmt"],
             player=player,
-            default_sample_rate=plugin_source.audio_format.sample_rate,
-            default_bit_depth=plugin_source.audio_format.bit_depth,
+            content_sample_rate=plugin_source.audio_format.sample_rate,
         )
         headers = {
             **DEFAULT_STREAM_HEADERS,
@@ -715,7 +753,7 @@ class StreamsController(CoreController):
                 queue_track = start_queue_item
             else:
                 try:
-                    queue_track = await self.mass.player_queues.load_next_item(
+                    queue_track = await self.mass.player_queues.get_next_queue_item(
                         queue.queue_id, queue_track.queue_item_id
                     )
                 except QueueEmpty:
@@ -949,25 +987,30 @@ class StreamsController(CoreController):
             filter_params.append(f"volume={gain_correct}dB")
         streamdetails.volume_normalization_gain_correct = gain_correct
 
-        if streamdetails.media_type == MediaType.RADIO:
-            # pad some silence before the radio stream starts to create some headroom
-            # for radio stations that do not provide any look ahead buffer
-            # without this, some radio streams jitter a lot, especially with dynamic normalization
-            pad_seconds = (
-                5
-                if streamdetails.volume_normalization_mode == VolumeNormalizationMode.DYNAMIC
-                else 2
-            )
-            async for chunk in get_silence(pad_seconds, pcm_format):
-                yield chunk
+        pad_silence_seconds = 0
+        if streamdetails.media_type == MediaType.RADIO or not streamdetails.duration:
+            # pad some silence before the radio/live stream starts to create some headroom
+            # for radio stations (or other live streams) that do not provide any look ahead buffer
+            # without this, some radio streams jitter a lot, especially with dynamic normalization,
+            # if the stream does not provide a look ahead buffer
+            pad_silence_seconds = 2
 
+        first_chunk_received = False
         async for chunk in get_media_stream(
             self.mass,
             streamdetails=streamdetails,
             pcm_format=pcm_format,
             filter_params=filter_params,
         ):
+            # yield silence when the chunk has been received from source but not yet sent to player
+            # so we have a bit of backpressure to prevent jittering
+            if not first_chunk_received and pad_silence_seconds:
+                first_chunk_received = True
+                async for silence in get_silence(pad_silence_seconds, pcm_format):
+                    yield silence
+                    del silence
             yield chunk
+            del chunk
 
     def _log_request(self, request: web.Request) -> None:
         """Log request."""
@@ -986,8 +1029,8 @@ class StreamsController(CoreController):
         self,
         output_format_str: str,
         player: Player,
-        default_sample_rate: int,
-        default_bit_depth: int,
+        content_sample_rate: int,
+        content_bit_depth: int,
     ) -> AudioFormat:
         """Parse (player specific) output format details for given format string."""
         content_type: ContentType = ContentType.try_parse(output_format_str)
@@ -996,20 +1039,21 @@ class StreamsController(CoreController):
         ] = await self.mass.config.get_player_config_value(
             player.player_id, CONF_SAMPLE_RATES, unpack_splitted_values=True
         )
+        output_channels_str = self.mass.config.get_raw_player_config_value(
+            player.player_id, CONF_OUTPUT_CHANNELS, "stereo"
+        )
         supported_sample_rates: tuple[int] = tuple(int(x[0]) for x in supported_rates_conf)
         supported_bit_depths: tuple[int] = tuple(int(x[1]) for x in supported_rates_conf)
 
         player_max_bit_depth = max(supported_bit_depths)
-        if default_sample_rate in supported_sample_rates:
-            output_sample_rate = default_sample_rate
+        output_bit_depth = min(content_bit_depth, player_max_bit_depth)
+        if content_sample_rate in supported_sample_rates:
+            output_sample_rate = content_sample_rate
         else:
             output_sample_rate = max(supported_sample_rates)
-        output_bit_depth = min(default_bit_depth, player_max_bit_depth)
-        output_channels_str = self.mass.config.get_raw_player_config_value(
-            player.player_id, CONF_OUTPUT_CHANNELS, "stereo"
-        )
-        output_channels = 1 if output_channels_str != "stereo" else 2
+
         if not content_type.is_lossless():
+            # no point in having a higher bit depth for lossy formats
             output_bit_depth = 16
             output_sample_rate = min(48000, output_sample_rate)
         if output_format_str == "pcm":
@@ -1018,7 +1062,7 @@ class StreamsController(CoreController):
             content_type=content_type,
             sample_rate=output_sample_rate,
             bit_depth=output_bit_depth,
-            channels=output_channels,
+            channels=1 if output_channels_str != "stereo" else 2,
         )
 
     async def _select_flow_format(
@@ -1043,3 +1087,17 @@ class StreamsController(CoreController):
             bit_depth=DEFAULT_PCM_FORMAT.bit_depth,
             channels=2,
         )
+
+    async def _clean_audio_cache(self) -> None:
+        """Clean up audio cache periodically."""
+        max_cache_size = await self.mass.config.get_core_config_value(
+            self.domain, CONF_AUDIO_CACHE_MAX_SIZE
+        )
+        cache_enabled = await self.mass.config.get_core_config_value(
+            self.domain, CONF_ALLOW_AUDIO_CACHE
+        )
+        if cache_enabled == "disabled":
+            max_cache_size = 0.001
+        await clean_old_files(self.audio_cache_dir, max_cache_size)
+        # reschedule self
+        self.mass.call_later(3600, self._clean_audio_cache)

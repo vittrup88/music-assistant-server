@@ -60,10 +60,15 @@ class FFMpeg(AsyncProcess):
         self._stdin_task: asyncio.Task | None = None
         self._logger_task: asyncio.Task | None = None
         self._input_codec_parsed = False
+        if audio_input == "-" or isinstance(audio_input, AsyncGenerator):
+            stdin = True
+        else:
+            stdin = audio_input if isinstance(audio_input, int) else False
+        stdout = audio_output if isinstance(audio_output, int) else bool(audio_output == "-")
         super().__init__(
             ffmpeg_args,
-            stdin=True if isinstance(audio_input, str | AsyncGenerator) else audio_input,
-            stdout=True if isinstance(audio_output, str) else audio_output,
+            stdin=stdin,
+            stdout=stdout,
             stderr=True,
         )
         self.logger = LOGGER
@@ -105,13 +110,9 @@ class FFMpeg(AsyncProcess):
         async for line in self.iter_stderr():
             if self.collect_log_history:
                 self.log_history.append(line)
-            if "error" in line or "warning" in line:
-                # ffmpeg logs can be a bit verbose and noisy so we tone them down a bit
-                # otherwise users get scared by all the red lines,
-                # even if its just a simple one-off encoding error
-                if self.logger.isEnabledFor(logging.DEBUG):
-                    self.logger.info(line)
-            elif "critical" in line:
+            # ffmpeg logging can be quite verbose, so we only log critical errors
+            # unless verbose logging is enabled
+            if "critical" in line:
                 self.logger.error(line)
             elif self.logger.isEnabledFor(VERBOSE_LOG_LEVEL):
                 self.logger.log(VERBOSE_LOG_LEVEL, line)
@@ -128,7 +129,8 @@ class FFMpeg(AsyncProcess):
                     content_type_raw = line.split(": Audio: ")[1].split(" ")[0]
                     content_type_raw = content_type_raw.split(",")[0]
                     content_type = ContentType.try_parse(content_type_raw)
-                    self.logger.debug(
+                    self.logger.log(
+                        VERBOSE_LOG_LEVEL,
                         "Detected (input) content type: %s (%s)",
                         content_type,
                         content_type_raw,
@@ -193,11 +195,16 @@ async def get_ffmpeg_stream(
         filter_params=filter_params,
         extra_args=extra_args,
         extra_input_args=extra_input_args,
+        collect_log_history=True,
     ) as ffmpeg_proc:
         # read final chunks from stdout
         iterator = ffmpeg_proc.iter_chunked(chunk_size) if chunk_size else ffmpeg_proc.iter_any()
         async for chunk in iterator:
             yield chunk
+        if ffmpeg_proc.returncode not in (None, 0):
+            # dump the last 5 lines of the log in case of an unclean exit
+            log_tail = "\n" + "\n".join(list(ffmpeg_proc.log_history)[-5:])
+            ffmpeg_proc.logger.error(log_tail)
 
 
 def get_ffmpeg_args(  # noqa: PLR0915
@@ -226,7 +233,6 @@ def get_ffmpeg_args(  # noqa: PLR0915
     ]
     # collect input args
     input_args = []
-
     if extra_input_args:
         input_args += extra_input_args
     if input_path.startswith("http"):
@@ -266,6 +272,9 @@ def get_ffmpeg_args(  # noqa: PLR0915
         ]
     elif input_format.codec_type != ContentType.UNKNOWN:
         input_args += ["-acodec", input_format.codec_type.name.lower(), "-i", input_path]
+    elif "-f" in extra_input_args:
+        # input format is already specified in the extra input args
+        pass
     else:
         # let ffmpeg auto detect the content type from the metadata/headers
         input_args += ["-i", input_path]
@@ -291,19 +300,8 @@ def get_ffmpeg_args(  # noqa: PLR0915
             "-f",
             output_format.content_type.value,
         ]
-    elif input_format == output_format and not filter_params and not extra_args:
-        # passthrough-mode (e.g. for creating the cache)
-        if output_format.content_type in (
-            ContentType.MP4,
-            ContentType.MP4A,
-            ContentType.M4A,
-            ContentType.M4B,
-        ):
-            fmt = "adts"
-        elif output_format.codec_type in (ContentType.UNKNOWN, ContentType.OGG):
-            fmt = "nut"  # use special nut container
-        else:
-            fmt = output_format.content_type.name.lower()
+    elif output_format.content_type == ContentType.NUT:
+        # passthrough-mode (for creating the cache) using NUT container
         output_args = [
             "-vn",
             "-dn",
@@ -311,7 +309,7 @@ def get_ffmpeg_args(  # noqa: PLR0915
             "-acodec",
             "copy",
             "-f",
-            fmt,
+            "nut",
         ]
     elif output_format.content_type == ContentType.AAC:
         output_args = ["-f", "adts", "-c:a", "aac", "-b:a", "256k"]
@@ -340,7 +338,6 @@ def get_ffmpeg_args(  # noqa: PLR0915
             "-compression_level",
             "0",
         ]
-
     else:
         raise RuntimeError("Invalid/unsupported output format specified")
 
