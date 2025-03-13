@@ -281,8 +281,7 @@ class DkDrLydMusicprovider(MusicProvider):
                     item_id="radio",
                     provider=self.domain,
                     path=path + "radio",
-                    name="",
-                    label="radio",
+                    name="radio",
                 ),
             ]
 
