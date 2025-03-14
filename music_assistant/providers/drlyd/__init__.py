@@ -5,7 +5,8 @@ from __future__ import annotations
 from collections.abc import AsyncGenerator, Sequence
 from typing import TYPE_CHECKING
 
-from music_assistant_models.enums import MediaType, ProviderFeature
+from music_assistant_models.config_entries import ConfigEntry
+from music_assistant_models.enums import ConfigEntryType, MediaType, ProviderFeature
 from music_assistant_models.errors import MediaNotFoundError
 from music_assistant_models.media_items import (
     BrowseFolder,
@@ -29,12 +30,15 @@ from .parsers import (
 )
 
 if TYPE_CHECKING:
-    from music_assistant_models.config_entries import ConfigEntry, ConfigValueType, ProviderConfig
+    from music_assistant_models.config_entries import ConfigValueType, ProviderConfig
     from music_assistant_models.provider import ProviderManifest
     from music_assistant_models.streamdetails import StreamDetails
 
     from music_assistant.mass import MusicAssistant
     from music_assistant.models import ProviderInstanceType
+
+# CONFIG
+CONF_DRLYD_APIKEY = "drlydapikey"
 
 
 async def setup(
@@ -75,7 +79,15 @@ async def get_config_entries(
     # or some other external service, we have a simple helper that can help you with those steps
     # and a callback url that you can use to redirect the user back to the Music Assistant UI.
     # See for example the Deezer provider for an example of how to use this.
-    return ()
+    return (
+        ConfigEntry(
+            key=CONF_DRLYD_APIKEY,
+            type=ConfigEntryType.STRING,
+            label="DRLYD X-APIKEY",
+            required=True,
+            description="X-APIKEY used for DRLYD",
+        ),
+    )
 
 
 class DkDrLydMusicprovider(MusicProvider):
@@ -97,7 +109,9 @@ class DkDrLydMusicprovider(MusicProvider):
 
     async def handle_async_init(self) -> None:
         """Handle async initialization of the provider."""
-        self._drlydapi = DrLydApi(self.mass.http_session)
+        self._drlydapi = DrLydApi(
+            self.mass.http_session, str(self.config.get_value(CONF_DRLYD_APIKEY))
+        )
 
     @property
     def is_streaming_provider(self) -> bool:

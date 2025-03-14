@@ -223,17 +223,17 @@ BASE_SEARCH_DRAPI_URL = BASE_DRAPI_URL + "/radio/v4/search"
 BASE_SERIES_DRAPI_URI = "/radio/v4/series"
 BASE_EPISODES_DRAPI_URI = "/radio/v4/episodes"
 
-APIKEY_HEADERS = {"x-apikey": "6Wkh8s98Afx1ZAaTT4FuWODTmvWGDPpR"}
-
 
 class DrLydApi:
     """DR Lyd api."""
 
     _session: ClientSession
+    _apikey_headers: Any | None
 
-    def __init__(self, session: ClientSession) -> None:
+    def __init__(self, session: ClientSession, apikey: str) -> None:
         """Init."""
         self._session = session
+        self._apikey_headers = {"x-apikey": apikey}
 
     async def get_radio_schedules(self) -> list[RadioSchedule]:
         """Get All Radio Schedules."""
@@ -263,14 +263,14 @@ class DrLydApi:
             + "/series?categories=&channels=&offset=0&limit=10&q="
             + search_query
         )
-        json_response = await self._call_api(url, headers=APIKEY_HEADERS)
+        json_response = await self._call_api(url, headers=self._apikey_headers)
         search_result = SeriesSearchResults.from_dict(json_response)
         return search_result.items
 
     async def get_series(self, slug_id: str) -> SeriesResult:
         """Get Series aka Podcast Series."""
         url = BASE_DRAPI_URL + BASE_SERIES_DRAPI_URI + "/" + slug_id
-        json_response = await self._call_api(url, headers=APIKEY_HEADERS)
+        json_response = await self._call_api(url, headers=self._apikey_headers)
         return SeriesResult.from_dict(json_response)
 
     async def get_episodes(self, series_slug_id: str) -> list[EpisodeResult]:
@@ -281,7 +281,7 @@ class DrLydApi:
         episode_results: list[EpisodeResult] = []
 
         while url:
-            json_response = await self._call_api(url, headers=APIKEY_HEADERS)
+            json_response = await self._call_api(url, headers=self._apikey_headers)
             series_episodes_result = SeriesEpisodeResult.from_dict(json_response)
             episode_results += series_episodes_result.items
             url = series_episodes_result.next
@@ -294,7 +294,7 @@ class DrLydApi:
         episode_id : can be id or slugid
         """
         url = BASE_DRAPI_URL + BASE_EPISODES_DRAPI_URI + "/" + episode_id
-        json_response = await self._call_api(url, headers=APIKEY_HEADERS)
+        json_response = await self._call_api(url, headers=self._apikey_headers)
         episode_result: EpisodeResult = EpisodeResult.from_dict(json_response)
         return episode_result
 
