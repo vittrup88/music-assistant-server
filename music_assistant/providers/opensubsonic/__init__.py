@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from music_assistant_models.config_entries import ConfigEntry, ConfigValueType, ProviderConfig
-from music_assistant_models.enums import ConfigEntryType
+from music_assistant_models.enums import ConfigEntryType, ProviderFeature
 
 from music_assistant.constants import CONF_PASSWORD, CONF_PATH, CONF_PORT, CONF_USERNAME
 
@@ -13,7 +13,12 @@ from .sonic_provider import (
     CONF_BASE_URL,
     CONF_ENABLE_LEGACY_AUTH,
     CONF_ENABLE_PODCASTS,
+    CONF_NEW_ALBUMS,
     CONF_OVERRIDE_OFFSET,
+    CONF_PAGE_SIZE,
+    CONF_PLAYED_ALBUMS,
+    CONF_RECO_FAVES,
+    CONF_RECO_SIZE,
     OpenSonicProvider,
 )
 
@@ -23,12 +28,33 @@ if TYPE_CHECKING:
     from music_assistant.mass import MusicAssistant
     from music_assistant.models import ProviderInstanceType
 
+SUPPORTED_FEATURES = {
+    ProviderFeature.LIBRARY_ARTISTS,
+    ProviderFeature.LIBRARY_ALBUMS,
+    ProviderFeature.LIBRARY_TRACKS,
+    ProviderFeature.LIBRARY_PLAYLISTS,
+    ProviderFeature.LIBRARY_PLAYLISTS_EDIT,
+    ProviderFeature.BROWSE,
+    ProviderFeature.SEARCH,
+    ProviderFeature.RECOMMENDATIONS,
+    ProviderFeature.ARTIST_ALBUMS,
+    ProviderFeature.ARTIST_TOPTRACKS,
+    ProviderFeature.SIMILAR_TRACKS,
+    ProviderFeature.PLAYLIST_TRACKS_EDIT,
+    ProviderFeature.PLAYLIST_CREATE,
+    ProviderFeature.LIBRARY_PODCASTS,
+    ProviderFeature.LIBRARY_PODCASTS_EDIT,
+    ProviderFeature.FAVORITE_ALBUMS_EDIT,
+    ProviderFeature.FAVORITE_ARTISTS_EDIT,
+    ProviderFeature.FAVORITE_TRACKS_EDIT,
+}
+
 
 async def setup(
     mass: MusicAssistant, manifest: ProviderManifest, config: ProviderConfig
 ) -> ProviderInstanceType:
     """Initialize provider(instance) with given configuration."""
-    return OpenSonicProvider(mass, manifest, config)
+    return OpenSonicProvider(mass, manifest, config, SUPPORTED_FEATURES)
 
 
 async def get_config_entries(
@@ -72,7 +98,7 @@ async def get_config_entries(
             type=ConfigEntryType.STRING,
             label="Server Path",
             required=False,
-            description="Path to append to base URL for Soubsonic server, this is likely "
+            description="Path to append to the base URL for the Subsonic server, this is likely "
             "empty unless you are path routing on a proxy",
         ),
         ConfigEntry(
@@ -86,7 +112,7 @@ async def get_config_entries(
         ConfigEntry(
             key=CONF_ENABLE_LEGACY_AUTH,
             type=ConfigEntryType.BOOLEAN,
-            label="Enable legacy auth",
+            label="Enable Legacy Auth",
             required=True,
             description='Enable OpenSubsonic "legacy" auth support',
             default_value=False,
@@ -94,10 +120,53 @@ async def get_config_entries(
         ConfigEntry(
             key=CONF_OVERRIDE_OFFSET,
             type=ConfigEntryType.BOOLEAN,
-            label="Force player provider seek",
+            label="Force Player Provider Seek",
             required=True,
             description="Some Subsonic implementations advertise that they support seeking when "
             "they do not always. If seeking does not work for you, enable this.",
             default_value=False,
+        ),
+        ConfigEntry(
+            key=CONF_RECO_FAVES,
+            type=ConfigEntryType.BOOLEAN,
+            label="Recommend Favorites",
+            required=True,
+            description="Should favorited (starred) items be included as recommendations.",
+            default_value=True,
+        ),
+        ConfigEntry(
+            key=CONF_NEW_ALBUMS,
+            type=ConfigEntryType.BOOLEAN,
+            label="Recommend New Albums",
+            required=True,
+            description="Should new albums be included as recommendations.",
+            default_value=True,
+        ),
+        ConfigEntry(
+            key=CONF_PLAYED_ALBUMS,
+            type=ConfigEntryType.BOOLEAN,
+            label="Recommend Most Played",
+            required=True,
+            description="Should most played albums be included as recommendations.",
+            default_value=True,
+        ),
+        ConfigEntry(
+            key=CONF_RECO_SIZE,
+            type=ConfigEntryType.INTEGER,
+            label="Recommendation Limit",
+            required=True,
+            description="How many recommendations from each enabled type should be included.",
+            default_value=10,
+        ),
+        ConfigEntry(
+            key=CONF_PAGE_SIZE,
+            type=ConfigEntryType.INTEGER,
+            label="Number of items included per server request.",
+            required=True,
+            description="When enumerating items from the server, how many should be in each "
+            "request. Smaller will require more requests but is better for low bandwidth "
+            "connections. The Open Subsonic spec says the max value for this is 500 items.",
+            default_value=200,
+            category="advanced",
         ),
     )

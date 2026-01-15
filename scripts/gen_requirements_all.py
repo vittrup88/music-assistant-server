@@ -12,7 +12,7 @@ from pathlib import Path
 PACKAGE_REGEX = re.compile(r"^(?:--.+\s)?([-_\.\w\d]+).*==.+$")
 GIT_REPO_REGEX = re.compile(r"^(git\+https:\/\/[-_\.\w\d\/]+[@-_\.\w\d\/]*)$")
 
-# ruff: noqa: PTH112,PTH113,PTH118,PTH123,T201
+# ruff: noqa: T201
 
 
 def gather_core_requirements() -> list[str]:
@@ -26,12 +26,12 @@ def gather_requirements_from_manifests() -> list[str]:
     """Gather all of the requirements from provider manifests."""
     dependencies: list[str] = []
     providers_path = "music_assistant/providers"
-    for dir_str in os.listdir(providers_path):
+    for dir_str in os.listdir(providers_path):  # noqa: PTH208, RUF100
         dir_path = os.path.join(providers_path, dir_str)
         if not os.path.isdir(dir_path):
             continue
         # get files in subdirectory
-        for file_str in os.listdir(dir_path):
+        for file_str in os.listdir(dir_path):  # noqa: PTH208, RUF100
             file_path = os.path.join(dir_path, file_str)
             if not os.path.isfile(file_path):
                 continue
@@ -80,7 +80,8 @@ def main() -> int:
     for req_key in sorted(final_requirements):
         req_str = final_requirements[req_key]
         content += f"{req_str}\n"
-    Path("requirements_all.txt").write_text(content)
+    # Always use LF line endings for cross-platform compatibility
+    Path("requirements_all.txt").write_text(content, newline="\n")
 
     return 0
 

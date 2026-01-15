@@ -20,7 +20,7 @@ from music_assistant_models.errors import InvalidDataError
 from music_assistant.constants import MASS_LOGGER_NAME, UNKNOWN_ARTIST
 from music_assistant.helpers.json import json_loads
 from music_assistant.helpers.process import AsyncProcess
-from music_assistant.helpers.util import try_parse_int
+from music_assistant.helpers.util import infer_album_type, try_parse_int
 
 LOGGER = logging.getLogger(f"{MASS_LOGGER_NAME}.tags")
 
@@ -32,16 +32,18 @@ LOGGER = logging.getLogger(f"{MASS_LOGGER_NAME}.tags")
 TAG_SPLITTER = ";"
 
 
-def clean_tuple(values: Iterable[str]) -> tuple:
+def clean_tuple(values: Iterable[str]) -> tuple[str, ...]:
     """Return a tuple with all empty values removed."""
     return tuple(x.strip() for x in values if x not in (None, "", " "))
 
 
-def split_items(org_str: str, allow_unsafe_splitters: bool = False) -> tuple[str, ...]:
+def split_items(
+    org_str: str | list[str] | tuple[str, ...] | None, allow_unsafe_splitters: bool = False
+) -> tuple[str, ...]:
     """Split up a tags string by common splitter."""
     if org_str is None:
         return ()
-    if isinstance(org_str, list):
+    if isinstance(org_str, tuple | list):
         final_items: list[str] = []
         for item in org_str:
             final_items.extend(split_items(item, allow_unsafe_splitters))
@@ -57,16 +59,25 @@ def split_items(org_str: str, allow_unsafe_splitters: bool = False) -> tuple[str
 
 
 def split_artists(
-    org_artists: str | tuple[str, ...], allow_ampersand: bool = False
+    org_artists: str | tuple[str, ...], allow_extra_splitters: bool = False
 ) -> tuple[str, ...]:
     """Parse all artists from a string."""
     final_artists: list[str] = []
     # when not using the multi artist tag, the artist string may contain
     # multiple artists in freeform, even featuring artists may be included in this
     # string. Try to parse the featuring artists and separate them.
-    splitters = ("featuring", " feat. ", " feat ", "feat.")
-    if allow_ampersand:
-        splitters = (*splitters, " & ")
+    splitters = [
+        " featuring ",
+        " feat. ",
+        " feat ",
+        " duet with ",
+        " with ",
+        " ft. ",
+        " vs. ",
+    ]
+    splitters += [x.title() for x in splitters]
+    if allow_extra_splitters:
+        splitters += [" & ", ", ", " + "]
     artists = split_items(org_artists, allow_unsafe_splitters=False)
     for item in artists:
         for splitter in splitters:
@@ -150,6 +161,25 @@ class AudioTags:
         if tag := self.tags.get("artist"):
             if TAG_SPLITTER in tag:
                 return split_items(tag)
+            if len(self.musicbrainz_artistids) > 1:
+                # special case: artist noted as 2 artists with ampersand or other splitter
+                # but with 2 mb ids so they should be treated as 2 artists
+                # example: John Travolta & Olivia Newton John on the Grease album
+                return split_artists(tag, allow_extra_splitters=True)
+
+            # Check if we have evidence of a SINGLE artist (should NOT split)
+            has_single_mb_id = len(self.musicbrainz_artistids) == 1
+            artists_plural = self.tags.get("artists", "")
+            has_single_in_artists_tag = artists_plural and TAG_SPLITTER not in artists_plural
+
+            if has_single_mb_id or has_single_in_artists_tag:
+                # Single artist confirmed by either single MB ID or ARTISTS tag without semicolons
+                # Return as-is without splitting to avoid incorrectly splitting artist names
+                # containing "with", "featuring", etc.
+                # Example: "Jerk With a Bomb" should not be split into "Jerk" and "a Bomb"
+                return (tag,)
+
+            # No evidence of single artist, proceed with splitting
             return split_artists(tag)
         # fallback to parsing from filename
         title = self.filename.rsplit(os.sep, 1)[-1].split(".")[0]
@@ -183,10 +213,24 @@ class AudioTags:
             if TAG_SPLITTER in tag:
                 return split_items(tag)
             if len(self.musicbrainz_albumartistids) > 1:
-                # special case: album artist noted as 2 artists with ampersand
+                # special case: album artist noted as 2 artists with ampersand or other splitter
                 # but with 2 mb ids so they should be treated as 2 artists
                 # example: John Travolta & Olivia Newton John on the Grease album
-                return split_artists(tag, allow_ampersand=True)
+                return split_artists(tag, allow_extra_splitters=True)
+
+            # Check if we have evidence of a SINGLE album artist (should NOT split)
+            has_single_mb_id = len(self.musicbrainz_albumartistids) == 1
+            albumartists_plural = self.tags.get("albumartists", "")
+            has_single_in_albumartists_tag = (
+                albumartists_plural and TAG_SPLITTER not in albumartists_plural
+            )
+
+            if has_single_mb_id or has_single_in_albumartists_tag:
+                # Single album artist confirmed by either single MB ID or ALBUMARTISTS tag
+                # without semicolons. Return as-is without splitting.
+                return (tag,)
+
+            # No evidence of single artist, proceed with splitting
             return split_artists(tag)
         return ()
 
@@ -298,28 +342,32 @@ class AudioTags:
         """Return albumtype tag if present."""
         if self.tags.get("compilation", "") == "1":
             return AlbumType.COMPILATION
+
         tag = (
             self.tags.get("musicbrainzalbumtype")
             or self.tags.get("albumtype")
             or self.tags.get("releasetype")
         )
-        if tag is None:
-            return AlbumType.UNKNOWN
-        # the album type tag is messy within id3 and may even contain multiple types
-        # try to parse one in order of preference
-        for album_type in (
-            AlbumType.COMPILATION,
-            AlbumType.EP,
-            AlbumType.SINGLE,
-            AlbumType.ALBUM,
-        ):
-            if album_type.value in tag.lower():
-                return album_type
 
-        return AlbumType.UNKNOWN
+        if tag is not None:
+            # try to parse one in order of preference
+            for album_type in (
+                AlbumType.LIVE,
+                AlbumType.SOUNDTRACK,
+                AlbumType.COMPILATION,
+                AlbumType.EP,
+                AlbumType.SINGLE,
+                AlbumType.ALBUM,
+            ):
+                if album_type.value in tag.lower():
+                    return album_type
+
+        # No valid tag found, try inference from album title
+        album_title = self.tags.get("album", "")
+        return infer_album_type(album_title, "")
 
     @property
-    def isrc(self) -> tuple[str]:
+    def isrc(self) -> tuple[str, ...]:
         """Return isrc tag(s)."""
         for tag_name in ("isrc", "tsrc"):
             if tag := self.tags.get(tag_name):
@@ -367,24 +415,44 @@ class AudioTags:
 
     @property
     def track_loudness(self) -> float | None:
-        """Try to read/calculate the integrated loudness from the tags."""
-        if (tag := self.tags.get("r128trackgain")) is not None:
-            return -23 - float(int(tag.split(" ")[0]) / 256)
-        if (tag := self.tags.get("replaygaintrackgain")) is not None:
-            return -18 - float(tag.split(" ")[0])
+        """Try to read/calculate the integrated loudness from the tags (track level)."""
+        if tag := self.tags.get("r128trackgain"):
+            try:
+                gain_adjustment = int(tag.split(" ")[0]) / 256
+                return -23 - gain_adjustment
+            except (ValueError, IndexError) as e:
+                LOGGER.warning(f"Invalid r128trackgain tag value: {tag!r} — {e}")
+
+        if tag := self.tags.get("replaygaintrackgain"):
+            try:
+                gain_adjustment = float(tag.split(" ")[0])
+                return -18 - gain_adjustment
+            except (ValueError, IndexError) as e:
+                LOGGER.warning(f"Invalid replaygaintrackgain tag value: {tag!r} — {e}")
+
         return None
 
     @property
     def track_album_loudness(self) -> float | None:
         """Try to read/calculate the integrated loudness from the tags (album level)."""
         if tag := self.tags.get("r128albumgain"):
-            return -23 - float(int(tag.split(" ")[0]) / 256)
-        if (tag := self.tags.get("replaygainalbumgain")) is not None:
-            return -18 - float(tag.split(" ")[0])
+            try:
+                gain_adjustment = int(tag.split(" ")[0]) / 256
+                return -23 - gain_adjustment
+            except (ValueError, IndexError) as e:
+                LOGGER.warning(f"Invalid r128albumgain tag value: {tag!r} — {e}")
+
+        if tag := self.tags.get("replaygainalbumgain"):
+            try:
+                gain_adjustment = float(tag.split(" ")[0])
+                return -18 - gain_adjustment
+            except (ValueError, IndexError) as e:
+                LOGGER.warning(f"Invalid replaygainalbumgain tag value: {tag!r} — {e}")
+
         return None
 
     @classmethod
-    def parse(cls, raw: dict) -> AudioTags:
+    def parse(cls, raw: dict[str, Any]) -> AudioTags:
         """Parse instance from raw ffmpeg info output."""
         audio_stream = next((x for x in raw["streams"] if x["codec_type"] == "audio"), None)
         if audio_stream is None:
@@ -401,7 +469,9 @@ class AudioTags:
             if stream.get("codec_type") == "video":
                 continue
             for key, value in stream.get("tags", {}).items():
-                alt_key = key.lower().replace(" ", "").replace("_", "").replace("-", "")
+                alt_key = key.lower()
+                for char in [" ", "_", "-", "/"]:
+                    alt_key = alt_key.replace(char, "")
                 if alt_key in tags:
                     continue
                 tags[alt_key] = value
@@ -421,7 +491,7 @@ class AudioTags:
             filename=raw["format"]["filename"],
         )
 
-    def get(self, key: str, default=None) -> Any:
+    def get(self, key: str, default: Any | None = None) -> Any:
         """Get tag by key."""
         return self.tags.get(key, default)
 
@@ -483,6 +553,12 @@ def parse_tags(
             extra_tags = parse_tags_mutagen(input_file)
             if extra_tags:
                 tags.tags.update(extra_tags)
+            # APEv2 cover art is not exposed as video streams by FFmpeg
+            # For APEv2-only formats (wv, ape, mpc, tak, ofr), assume they might have cover art
+            # We avoid calling mutagen here to prevent double file reads (blocking I/O)
+            # The actual extraction happens later in get_apev2_image() if needed
+            if not tags.has_cover_image and _format_uses_apev2(tags.format):
+                tags.has_cover_image = True
         return tags
     except subprocess.CalledProcessError as err:
         error_msg = f"Unable to retrieve info for {input_file}"
@@ -518,7 +594,7 @@ def get_file_duration(input_file: str) -> float:
         # extract duration from ffmpeg output
         duration_str = res.split("time=")[-1].split(" ")[0].strip()
         duration_parts = duration_str.split(":")
-        duration = 0
+        duration = 0.0
         for part in duration_parts:
             duration = duration * 60 + float(part)
         return duration
@@ -533,10 +609,11 @@ def parse_tags_mutagen(input_file: str) -> dict[str, Any]:
 
     NOT Async friendly.
     """
-    result = {}
+    result: dict[str, Any] = {}
     try:
         # TODO: extend with more tags and file types!
-        tags = mutagen.File(input_file)
+        # https://mutagen.readthedocs.io/en/latest/user/gettingstarted.html
+        tags = mutagen.File(input_file)  # type: ignore[attr-defined]
         if tags is None or not tags.tags:
             return result
         tags = dict(tags.tags)
@@ -585,12 +662,79 @@ def parse_tags_mutagen(input_file: str) -> dict[str, Any]:
         return result
 
 
+def _format_uses_apev2(format_name: str) -> bool:
+    """Check if an audio format exclusively uses APEv2 tags.
+
+    These formats ONLY use APEv2 tags and cannot have cover art detected by ffprobe's
+    video stream detection (unlike ID3's APIC which shows as mjpeg/png stream).
+
+    Formats checked: WavPack, Musepack, Monkey's Audio, OptimFROG, TAK.
+    Note: MP3 is NOT included as MP3 files almost always use ID3 tags, which are
+    already handled by ffprobe. Checking all MP3 files would impact performance.
+
+    :param format_name: The format name from ffprobe (e.g., "wv", "ape", "mpc").
+    """
+    # Map ffprobe format names to our check
+    # wv = WavPack, ape = Monkey's Audio, mpc/mpc8 = Musepack
+    # tak = TAK, ofr = OptimFROG
+    apev2_only_formats = {"wv", "ape", "mpc", "mpc8", "tak", "ofr"}
+    return format_name.lower() in apev2_only_formats
+
+
+def get_apev2_image(input_file: str) -> bytes | None:
+    """Extract cover art from APEv2 tags using mutagen.
+
+    APEv2 tags (used by WavPack, Musepack, etc.) store cover art differently
+    than ID3 tags. FFmpeg does not expose these as video streams, so we use
+    mutagen for direct extraction.
+
+    :param input_file: Path to the local audio file.
+    """
+    audio = mutagen.File(input_file)  # type: ignore[attr-defined]
+    if audio is None or not hasattr(audio, "tags") or audio.tags is None:
+        return None
+
+    # APEv2 cover art can use various tag names
+    cover_tag_names = [
+        "Cover Art (Front)",
+        "COVER ART (FRONT)",
+        "Cover Art (front)",
+        "cover art (front)",
+        "COVERART",
+        "coverart",
+    ]
+
+    for tag_name in cover_tag_names:
+        if tag_name in audio.tags:
+            cover_data = audio.tags[tag_name].value
+            if isinstance(cover_data, bytes):
+                # APEv2 cover art format: description\x00image_data
+                null_index = cover_data.find(b"\x00")
+                if null_index != -1:
+                    # Extract image data after the null-terminated description
+                    return cover_data[null_index + 1 :]
+                # No description field, return entire data as image
+                return cover_data
+    return None
+
+
 async def get_embedded_image(input_file: str) -> bytes | None:
     """Return embedded image data.
 
     Input_file may be a (local) filename or URL accessible by ffmpeg.
     """
-    args = (
+    # For APEv2-only formats, use mutagen since FFmpeg cannot extract APEv2 cover art
+    # Only check files with extensions that exclusively use APEv2 tags to avoid
+    # unnecessary blocking I/O for MP3/FLAC/OGG/etc files
+    if not input_file.startswith(("http://", "https://")) and os.path.isfile(input_file):
+        # Check file extension to determine if it's an APEv2-only format
+        ext = input_file.lower().rsplit(".", 1)[-1] if "." in input_file else ""
+        if _format_uses_apev2(ext):
+            if img_data := await asyncio.to_thread(get_apev2_image, input_file):
+                return img_data
+
+    # Use FFmpeg for all other cases (URLs, ID3 tags, Vorbis comments, etc.)
+    args = [
         "ffmpeg",
         "-hide_banner",
         "-loglevel",
@@ -603,7 +747,7 @@ async def get_embedded_image(input_file: str) -> bytes | None:
         "-f",
         "mjpeg",
         "-",
-    )
+    ]
     async with AsyncProcess(
         args, stdin=False, stdout=True, stderr=None, name="ffmpeg_image"
     ) as ffmpeg:

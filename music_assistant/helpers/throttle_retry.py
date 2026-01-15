@@ -8,7 +8,8 @@ from collections import deque
 from collections.abc import AsyncGenerator, Awaitable, Callable, Coroutine
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
-from typing import TYPE_CHECKING, Any, Concatenate, ParamSpec, TypeVar
+from types import TracebackType
+from typing import TYPE_CHECKING, Any, Concatenate
 
 from music_assistant_models.errors import ResourceTemporarilyUnavailable, RetriesExhausted
 
@@ -17,9 +18,6 @@ from music_assistant.constants import MASS_LOGGER_NAME
 if TYPE_CHECKING:
     from music_assistant.models.provider import Provider
 
-_ProviderT = TypeVar("_ProviderT", bound="Provider")
-_R = TypeVar("_R")
-_P = ParamSpec("_P")
 LOGGER = logging.getLogger(f"{MASS_LOGGER_NAME}.throttle_retry")
 
 BYPASS_THROTTLER: ContextVar[bool] = ContextVar("BYPASS_THROTTLER", default=False)
@@ -33,13 +31,13 @@ class Throttler:
     - Return the delay caused by acquire()
     """
 
-    def __init__(self, rate_limit: int, period=1.0):
+    def __init__(self, rate_limit: int, period: float = 1.0) -> None:
         """Initialize the Throttler."""
         self.rate_limit = rate_limit
         self.period = period
         self._task_logs: deque[float] = deque()
 
-    def _flush(self):
+    def _flush(self) -> None:
         now = time.monotonic()
         while self._task_logs:
             if now - self._task_logs[0] > self.period:
@@ -67,21 +65,28 @@ class Throttler:
         """Wait until the lock is acquired, return the time delay."""
         return await self.acquire()
 
-    async def __aexit__(self, exc_type, exc, tb):
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: TracebackType | None,
+    ) -> bool | None:
         """Nothing to do on exit."""
 
 
 class ThrottlerManager:
     """Throttler manager that extends asyncio Throttle by retrying."""
 
-    def __init__(self, rate_limit: int, period: float = 1, retry_attempts=5, initial_backoff=5):
+    def __init__(
+        self, rate_limit: int, period: float = 1, retry_attempts: int = 5, initial_backoff: int = 5
+    ):
         """Initialize the AsyncThrottledContextManager."""
         self.retry_attempts = retry_attempts
         self.initial_backoff = initial_backoff
         self.throttler = Throttler(rate_limit, period)
 
     @asynccontextmanager
-    async def acquire(self) -> AsyncGenerator[None, float]:
+    async def acquire(self) -> AsyncGenerator[float, None]:
         """Acquire a free slot from the Throttler, returns the throttled time."""
         if BYPASS_THROTTLER.get():
             yield 0
@@ -98,16 +103,16 @@ class ThrottlerManager:
             BYPASS_THROTTLER.reset(token)
 
 
-def throttle_with_retries(
-    func: Callable[Concatenate[_ProviderT, _P], Awaitable[_R]],
-) -> Callable[Concatenate[_ProviderT, _P], Coroutine[Any, Any, _R]]:
+def throttle_with_retries[ProviderT: "Provider", **P, R](
+    func: Callable[Concatenate[ProviderT, P], Awaitable[R]],
+) -> Callable[Concatenate[ProviderT, P], Coroutine[Any, Any, R]]:
     """Call async function using the throttler with retries."""
 
     @functools.wraps(func)
-    async def wrapper(self: _ProviderT, *args: _P.args, **kwargs: _P.kwargs) -> _R:
+    async def wrapper(self: ProviderT, *args: P.args, **kwargs: P.kwargs) -> R:
         """Call async function using the throttler with retries."""
         # the trottler attribute must be present on the class
-        throttler: ThrottlerManager = self.throttler
+        throttler: ThrottlerManager = self.throttler  # type: ignore[attr-defined]
         backoff_time = throttler.initial_backoff
         async with throttler.acquire() as delay:
             if delay != 0:

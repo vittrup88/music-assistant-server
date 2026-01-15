@@ -8,7 +8,7 @@ from dataclasses import dataclass
 
 from music_assistant.helpers.compare import compare_strings
 
-IGNORE_DIRS = ("recycle", "Recently-Snaphot")
+IGNORE_DIRS = ("recycle", "Recently-Snaphot", "#recycle", "System Volume Information", "lost+found")
 
 
 @dataclass
@@ -22,6 +22,7 @@ class FileSystemItem:
     - is_dir: Boolean if item is directory (not file).
     - checksum: Checksum for this path (usually last modified time) None for dir.
     - file_size : File size in number of bytes or None if unknown (or not a file).
+    - created_at: File creation timestamp (Unix epoch) or None for directories.
     """
 
     filename: str
@@ -30,6 +31,7 @@ class FileSystemItem:
     is_dir: bool
     checksum: str | None = None
     file_size: int | None = None
+    created_at: int | None = None  # file creation timestamp (Unix epoch)
 
     @property
     def ext(self) -> str | None:
@@ -62,7 +64,10 @@ class FileSystemItem:
 
     @classmethod
     def from_dir_entry(cls, entry: os.DirEntry[str], base_path: str) -> FileSystemItem:
-        """Create FileSystemItem from os.DirEntry. NOT Async friendly."""
+        """Create FileSystemItem from os.DirEntry. NOT Async friendly.
+
+        :raises OSError: If the file cannot be stat'd (e.g., invalid filename encoding).
+        """
         if entry.is_dir(follow_symlinks=False):
             return cls(
                 filename=entry.name,
@@ -72,7 +77,12 @@ class FileSystemItem:
                 checksum=None,
                 file_size=None,
             )
+        # This can raise OSError for files with invalid encoding (e.g., emojis on SMB mounts)
+        # Let the caller handle the exception
         stat = entry.stat(follow_symlinks=False)
+        # st_birthtime is available on macOS/Windows, st_ctime on Linux
+        # (on Linux st_ctime is metadata change time, not creation time)
+        created_at = int(getattr(stat, "st_birthtime", stat.st_ctime))
         return cls(
             filename=entry.name,
             relative_path=get_relative_path(base_path, entry.path),
@@ -80,6 +90,7 @@ class FileSystemItem:
             is_dir=False,
             checksum=str(int(stat.st_mtime)),
             file_size=stat.st_size,
+            created_at=created_at,
         )
 
 
@@ -219,14 +230,20 @@ def sorted_scandir(base_path: str, sub_path: str, sort: bool = False) -> list[Fi
 
     if base_path not in sub_path:
         sub_path = os.path.join(base_path, sub_path)
-    items = [
-        FileSystemItem.from_dir_entry(x, base_path)
-        for x in os.scandir(sub_path)
+    items = []
+    for entry in os.scandir(sub_path):
         # filter out invalid dirs and hidden files
-        if (x.is_dir(follow_symlinks=False) or x.is_file(follow_symlinks=False))
-        and x.name not in IGNORE_DIRS
-        and not x.name.startswith(".")
-    ]
+        if not (entry.is_dir(follow_symlinks=False) or entry.is_file(follow_symlinks=False)):
+            continue
+        if entry.name in IGNORE_DIRS or entry.name.startswith("."):
+            continue
+        try:
+            items.append(FileSystemItem.from_dir_entry(entry, base_path))
+        except OSError:
+            # Skip files that cannot be stat'd (e.g., invalid encoding on SMB mounts)
+            # This typically happens with emoji or special unicode characters
+            continue
+
     if sort:
         return sorted(
             items,

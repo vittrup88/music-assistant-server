@@ -22,11 +22,20 @@ async def get_libraries(
     local_server_ip: str,
     local_server_port: str,
     local_server_verify_cert: bool,
+    instance_id: str | None = None,
 ) -> list[str]:
     """
     Get all music libraries for all plex servers.
 
-    Returns a dict of Library names in format {'servername / library name':'baseurl'}
+    Returns a list of Library names in format ['servername / library name', ...]
+
+    :param mass: MusicAssistant instance.
+    :param auth_token: Authentication token for Plex server.
+    :param local_server_ssl: Whether to use SSL/HTTPS.
+    :param local_server_ip: IP address of the Plex server.
+    :param local_server_port: Port of the Plex server.
+    :param local_server_verify_cert: Whether to verify SSL certificate.
+    :param instance_id: Provider instance ID to use for cache isolation.
     """
     cache_key = "plex_libraries"
 
@@ -47,19 +56,27 @@ async def get_libraries(
                 auth_token,
                 session=session,
             )
-        for media_section in cast(list[PlexLibrarySection], plex_server.library.sections()):
+        for media_section in cast("list[PlexLibrarySection]", plex_server.library.sections()):
             if media_section.type != PlexMusicSection.TYPE:
                 continue
             # TODO: figure out what plex uses as stable id and use that instead of names
             all_libraries.append(f"{plex_server.friendlyName} / {media_section.title}")
         return all_libraries
 
-    if cache := await mass.cache.get(cache_key, checksum=auth_token):
-        return cast(list[str], cache)
+    if cache := await mass.cache.get(
+        cache_key, checksum=auth_token, provider=instance_id or local_server_ip
+    ):
+        return cast("list[str]", cache)
 
     result = await asyncio.to_thread(_get_libraries)
     # use short expiration for in-memory cache
-    await mass.cache.set(cache_key, result, checksum=auth_token, expiration=3600)
+    await mass.cache.set(
+        cache_key,
+        result,
+        checksum=auth_token,
+        expiration=3600,
+        provider=instance_id or "default",
+    )
     return result
 
 

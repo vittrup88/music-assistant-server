@@ -3,14 +3,15 @@
 from __future__ import annotations
 
 from aiosonos.api.models import PlayBackState as SonosPlayBackState
-from music_assistant_models.enums import PlayerFeature, PlayerState
-from music_assistant_models.player import PlayerSource
+from music_assistant_models.enums import PlaybackState, PlayerFeature
+
+from music_assistant.models.player import PlayerSource
 
 PLAYBACK_STATE_MAP = {
-    SonosPlayBackState.PLAYBACK_STATE_BUFFERING: PlayerState.PLAYING,
-    SonosPlayBackState.PLAYBACK_STATE_IDLE: PlayerState.IDLE,
-    SonosPlayBackState.PLAYBACK_STATE_PAUSED: PlayerState.PAUSED,
-    SonosPlayBackState.PLAYBACK_STATE_PLAYING: PlayerState.PLAYING,
+    SonosPlayBackState.PLAYBACK_STATE_BUFFERING: PlaybackState.PLAYING,
+    SonosPlayBackState.PLAYBACK_STATE_IDLE: PlaybackState.IDLE,
+    SonosPlayBackState.PLAYBACK_STATE_PAUSED: PlaybackState.PAUSED,
+    SonosPlayBackState.PLAYBACK_STATE_PLAYING: PlaybackState.PLAYING,
 }
 
 PLAYER_FEATURES_BASE = {
@@ -20,6 +21,7 @@ PLAYER_FEATURES_BASE = {
     PlayerFeature.NEXT_PREVIOUS,
     PlayerFeature.SEEK,
     PlayerFeature.SELECT_SOURCE,
+    PlayerFeature.GAPLESS_PLAYBACK,
 }
 
 SOURCE_LINE_IN = "line_in"
@@ -50,7 +52,7 @@ PLAYER_SOURCE_MAP = {
     ),
     SOURCE_AIRPLAY: PlayerSource(
         id=SOURCE_AIRPLAY,
-        name="Airplay",
+        name="AirPlay",
         passive=True,
         can_play_pause=True,
         can_next_previous=True,

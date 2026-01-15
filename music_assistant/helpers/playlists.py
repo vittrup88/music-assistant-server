@@ -8,13 +8,13 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 from urllib.parse import urlparse
 
-from aiohttp import client_exceptions
+from aiohttp import ClientTimeout, client_exceptions
 from music_assistant_models.errors import InvalidDataError
 
 from music_assistant.helpers.util import detect_charset
 
 if TYPE_CHECKING:
-    from music_assistant import MusicAssistant
+    from music_assistant.mass import MusicAssistant
 
 
 LOGGER = logging.getLogger(__name__)
@@ -48,7 +48,12 @@ class PlaylistItem:
 
 
 def parse_m3u(m3u_data: str) -> list[PlaylistItem]:
-    """Very simple m3u parser.
+    """Lightweight M3U/M3U8 parser for playlist URL extraction.
+
+    This parser returns a flat list of playlist items with basic metadata.
+    Supports HLS master playlist tags (#EXT-X-STREAM-INF, #EXT-X-KEY) for
+    stream selection and quality sorting, but does not preserve segment-level
+    details or playlist structure.
 
     Based on https://github.com/dvndrsn/M3uParser/blob/master/m3uparser.py
     """
@@ -60,7 +65,7 @@ def parse_m3u(m3u_data: str) -> list[PlaylistItem]:
 
     length = None
     title = None
-    stream_info = None
+    stream_info: dict[str, str] | None = None
     key = None
 
     for line in m3u_lines:
@@ -75,7 +80,7 @@ def parse_m3u(m3u_data: str) -> list[PlaylistItem]:
                 length = None
             title = info[1].strip()
         elif line.startswith("#EXT-X-STREAM-INF:"):
-            # HLS stream properties
+            # HLS master playlist variant stream properties (BANDWIDTH, RESOLUTION, etc.)
             # https://datatracker.ietf.org/doc/html/draft-pantos-http-live-streaming-19#section-10
             stream_info = {}
             for part in line.replace("#EXT-X-STREAM-INF:", "").split(","):
@@ -84,7 +89,12 @@ def parse_m3u(m3u_data: str) -> list[PlaylistItem]:
                 kev_value_parts = part.strip().split("=")
                 stream_info[kev_value_parts[0]] = kev_value_parts[1]
         elif line.startswith("#EXT-X-KEY:"):
-            key = line.split(",URI=")[1].strip('"')
+            # Extract encryption key URI from master/media playlist
+            # METHOD=NONE means no encryption, so explicitly clear the key
+            if "METHOD=NONE" in line:
+                key = None
+            elif ",URI=" in line:
+                key = line.split(",URI=")[1].strip('"')
         elif line.startswith("#"):
             # Ignore other extensions
             continue
@@ -116,7 +126,7 @@ def parse_pls(pls_data: str) -> list[PlaylistItem]:
     except configparser.Error as err:
         raise InvalidDataError("Can't parse playlist") from err
 
-    if "playlist" not in pls_parser or pls_parser["playlist"].getint("Version") != 2:
+    if "playlist" not in pls_parser:
         raise InvalidDataError("Invalid playlist")
 
     try:
@@ -148,7 +158,9 @@ async def fetch_playlist(
 ) -> list[PlaylistItem]:
     """Parse an online m3u or pls playlist."""
     try:
-        async with mass.http_session.get(url, allow_redirects=True, timeout=5) as resp:
+        async with mass.http_session.get(
+            url, allow_redirects=True, timeout=ClientTimeout(total=5)
+        ) as resp:
             try:
                 raw_data = await resp.content.read(64 * 1024)
                 # NOTE: using resp.charset is not reliable, we need to detect it ourselves

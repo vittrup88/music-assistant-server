@@ -4,6 +4,7 @@ import asyncio
 import logging
 import time
 from collections.abc import Callable
+from typing import TYPE_CHECKING, cast
 
 import pylast
 from music_assistant_models.config_entries import (
@@ -13,24 +14,32 @@ from music_assistant_models.config_entries import (
     ProviderConfig,
 )
 from music_assistant_models.constants import SECURE_STRING_SUBSTITUTE
-from music_assistant_models.enums import ConfigEntryType, EventType
+from music_assistant_models.enums import ConfigEntryType, EventType, ProviderFeature
 from music_assistant_models.errors import LoginFailed, SetupFailedError
-from music_assistant_models.event import MassEvent
 from music_assistant_models.playback_progress_report import MediaItemPlaybackProgressReport
 from music_assistant_models.provider import ProviderManifest
 
 from music_assistant.constants import MASS_LOGGER_NAME
 from music_assistant.helpers.auth import AuthenticationHelper
+from music_assistant.helpers.scrobbler import (
+    ScrobblerConfig,
+    ScrobblerHelper,
+    create_scrobble_users_config_entry,
+)
 from music_assistant.mass import MusicAssistant
 from music_assistant.models import ProviderInstanceType
 from music_assistant.models.plugin import PluginProvider
+
+SUPPORTED_FEATURES: set[ProviderFeature] = (
+    set()
+)  # we don't have any special supported features (yet)
 
 
 async def setup(
     mass: MusicAssistant, manifest: ProviderManifest, config: ProviderConfig
 ) -> ProviderInstanceType:
     """Initialize provider(instance) with given configuration."""
-    provider = LastFMScrobbleProvider(mass, manifest, config)
+    provider = LastFMScrobbleProvider(mass, manifest, config, SUPPORTED_FEATURES)
     pylast.logger.setLevel(provider.logger.level)
 
     # httpcore is very spammy on debug without providing useful information 99% of the time
@@ -45,7 +54,40 @@ async def setup(
 class LastFMScrobbleProvider(PluginProvider):
     """Plugin provider to support scrobbling of tracks."""
 
-    _on_unload: list[Callable[[], None]] = []
+    network: pylast._Network
+    _on_unload: list[Callable[[], None]]
+
+    async def handle_async_init(self) -> None:
+        """Handle async setup."""
+        self._on_unload: list[Callable[[], None]] = []
+
+        if not self.config.get_value(CONF_API_KEY) or not self.config.get_value(CONF_API_SECRET):
+            raise SetupFailedError("API Key and Secret need to be set")
+
+        if not self.config.get_value(CONF_SESSION_KEY):
+            self.logger.info("No session key available, don't forget to authenticate!")
+            return
+        # creating the network instance is (potentially) blocking IO
+        # so run it in an executor thread to be safe
+        self.network = await asyncio.to_thread(get_network, self._get_network_config())
+
+    async def loaded_in_mass(self) -> None:
+        """Call after the provider has been loaded."""
+        await super().loaded_in_mass()
+
+        # subscribe to media_item_played event
+        handler = LastFMEventHandler(self.network, self.logger, self.config)
+        self._on_unload.append(
+            self.mass.subscribe(handler._on_mass_media_item_played, EventType.MEDIA_ITEM_PLAYED)
+        )
+
+    async def unload(self, is_removed: bool = False) -> None:
+        """Handle unload/close of the provider.
+
+        Called when provider is deregistered (e.g. MA exiting or config reloading).
+        """
+        for unload_cb in self._on_unload:
+            unload_cb()
 
     def _get_network_config(self) -> dict[str, ConfigValueType]:
         return {
@@ -56,112 +98,45 @@ class LastFMScrobbleProvider(PluginProvider):
             CONF_SESSION_KEY: self.config.get_value(CONF_SESSION_KEY),
         }
 
-    async def loaded_in_mass(self) -> None:
-        """Call after the provider has been loaded."""
-        await super().loaded_in_mass()
 
-        if not self.config.get_value(CONF_SESSION_KEY):
-            self.logger.info("No session key available, don't forget to authenticate!")
-            return
-
-        handler = LastFMEventHandler(_get_network(self._get_network_config()), self.logger)
-
-        # subscribe to internal event
-        self._on_unload.append(
-            self.mass.subscribe(handler._on_mass_media_item_played, EventType.MEDIA_ITEM_PLAYED)
-        )
-
-    async def unload(self, is_removed: bool = False) -> None:
-        """
-        Handle unload/close of the provider.
-
-        Called when provider is deregistered (e.g. MA exiting or config reloading).
-        """
-        for unload_cb in self._on_unload:
-            unload_cb()
-
-
-class LastFMEventHandler:
+class LastFMEventHandler(ScrobblerHelper):
     """Handles the event handling."""
 
-    logger: logging.Logger
     network: pylast._Network
-    currently_playing: str | None = None
-    last_scrobbled: str | None = None
 
-    def __init__(self, network: pylast._Network, logger: logging.Logger) -> None:
+    def __init__(
+        self, network: pylast._Network, logger: logging.Logger, config: ProviderConfig
+    ) -> None:
         """Initialize."""
+        super().__init__(logger, ScrobblerConfig.create_from_config(config))
         self.network = network
-        self.logger = logger
 
-    async def _on_mass_media_item_played(self, event: MassEvent) -> None:
-        """Media item has finished playing, we'll scrobble the track."""
-        if self.network is None:
-            self.logger.error("no network available during _on_mass_media_item_played")
-            return
+    async def _update_now_playing(self, report: MediaItemPlaybackProgressReport) -> None:
+        # the lastfm client is not async friendly,
+        # so we need to run it in a executor thread
+        await asyncio.to_thread(
+            self.network.update_now_playing,
+            report.artist,
+            self.get_name(report),
+            report.album,
+            duration=report.duration,
+            mbid=report.mbid,
+        )
 
-        report: MediaItemPlaybackProgressReport = event.data
-
-        # poor mans attempt to detect a song on loop
-        if not report.fully_played and report.uri == self.last_scrobbled:
-            self.logger.debug(
-                "reset _last_scrobbled and _currently_playing because the song was restarted"
-            )
-            self.last_scrobbled = None
-            # reset currently playing to avoid it expiring when looping single songs
-            self.currently_playing = None
-
-        def update_now_playing() -> None:
-            try:
-                self.network.update_now_playing(
-                    report.artist,
-                    report.name,
-                    report.album,
-                    duration=report.duration,
-                    mbid=report.mbid,
-                )
-                self.logger.debug(f"track {report.uri} marked as 'now playing'")
-                self.currently_playing = report.uri
-            except Exception as err:
-                self.logger.exception(err)
-
-        def scrobble() -> None:
-            try:
-                # album artist and track number are not available without an extra API call
-                # so they won't be scrobbled
-                self.network.scrobble(
-                    report.artist,
-                    report.name,
-                    time.time(),
-                    report.album,
-                    duration=report.duration,
-                    mbid=report.mbid,
-                )
-                self.last_scrobbled = report.uri
-            except Exception as err:
-                self.logger.exception(err)
-
-        # update now playing if needed
-        if report.is_playing and (
-            self.currently_playing is None or self.currently_playing != report.uri
-        ):
-            await asyncio.to_thread(update_now_playing)
-
-        if self.should_scrobble(report):
-            await asyncio.to_thread(scrobble)
-
-    def should_scrobble(self, report: MediaItemPlaybackProgressReport) -> bool:
-        """Determine if a track should be scrobbled, to be extended later."""
-        if self.last_scrobbled == report.uri:
-            self.logger.debug("skipped scrobbling due to duplicate event")
-            return False
-
-        # ideally we want more precise control
-        # but because the event is triggered every 30s
-        # and we don't have full queue details to determine
-        # the exact context in which the event was fired
-        # we can only rely on fully_played for now
-        return bool(report.fully_played)
+    async def _scrobble(self, report: MediaItemPlaybackProgressReport) -> None:
+        # the listenbrainz client is not async friendly,
+        # so we need to run it in a executor thread
+        # NOTE: album artist and track number are not available without an extra API call
+        # so they won't be scrobbled
+        await asyncio.to_thread(
+            self.network.scrobble,
+            report.artist or "unknown artist",
+            self.get_name(report),
+            int(time.time()),
+            report.album,
+            duration=report.duration,
+            mbid=report.mbid,
+        )
 
 
 # configuration keys
@@ -199,7 +174,8 @@ async def get_config_entries(
         provider = str(values.get(CONF_PROVIDER))
 
     # collect all config entries to show
-    entries: list[ConfigEntry] = [
+    entries: list[ConfigEntry] = ScrobblerConfig.get_shared_config_entries(values)
+    entries += [
         ConfigEntry(
             key=CONF_PROVIDER,
             type=ConfigEntryType.STRING,
@@ -227,6 +203,8 @@ async def get_config_entries(
             required=True,
             value=values.get(CONF_API_SECRET) if values else None,
         ),
+        # add user selection entry
+        await create_scrobble_users_config_entry(mass),
     ]
 
     # early return so we can assume values are present
@@ -237,7 +215,7 @@ async def get_config_entries(
         session_id = str(values.get("session_id"))
 
         async with AuthenticationHelper(mass, session_id) as auth_helper:
-            network = _get_network(values)
+            network = get_network(values)
             skg = pylast.SessionKeyGenerator(network)
 
             # pylast says it does web auth, but actually does desktop auth
@@ -306,10 +284,12 @@ async def get_config_entries(
     return tuple(entries)
 
 
-def _get_network(config: dict[str, ConfigValueType]) -> pylast._Network:
+def get_network(config: dict[str, ConfigValueType]) -> pylast._Network:
+    """Create a network instance."""
     key = config.get(CONF_API_KEY)
     secret = config.get(CONF_API_SECRET)
     session_key = config.get(CONF_SESSION_KEY)
+    username = config.get(CONF_USERNAME)
 
     assert key
     assert key != SECURE_STRING_SUBSTITUTE
@@ -321,14 +301,16 @@ def _get_network(config: dict[str, ConfigValueType]) -> pylast._Network:
 
     provider: str = str(config.get(CONF_PROVIDER))
 
+    if TYPE_CHECKING:
+        key = cast("str", key)
+        secret = cast("str", secret)
+        session_key = cast("str", session_key)
+        username = cast("str", username)
+
     match provider.lower():
         case "lastfm":
-            return pylast.LastFMNetwork(
-                key, secret, username=config.get(CONF_USERNAME), session_key=session_key
-            )
+            return pylast.LastFMNetwork(key, secret, username=username, session_key=session_key)
         case "librefm":
-            return pylast.LibreFMNetwork(
-                key, secret, username=config.get(CONF_USERNAME), session_key=session_key
-            )
+            return pylast.LibreFMNetwork(key, secret, username=username, session_key=session_key)
         case _:
             raise SetupFailedError(f"unknown provider {provider} configured")

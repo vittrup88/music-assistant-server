@@ -6,13 +6,11 @@ import asyncio
 import os
 import time
 from collections.abc import AsyncGenerator
-from typing import TYPE_CHECKING, NotRequired, TypedDict, cast
+from typing import TYPE_CHECKING, Final, cast
 
 import aiofiles
 import shortuuid
-from music_assistant_models.config_entries import ConfigEntry
 from music_assistant_models.enums import (
-    ConfigEntryType,
     ContentType,
     ImageType,
     MediaType,
@@ -38,69 +36,66 @@ from music_assistant_models.media_items import (
 )
 from music_assistant_models.streamdetails import StreamDetails
 
-from music_assistant.constants import CACHE_CATEGORY_MEDIA_INFO, MASS_LOGO, VARIOUS_ARTISTS_FANART
+from music_assistant.constants import MASS_LOGO, VARIOUS_ARTISTS_FANART
+from music_assistant.controllers.cache import use_cache
 from music_assistant.helpers.tags import AudioTags, async_parse_tags
 from music_assistant.helpers.uri import parse_uri
 from music_assistant.models.music_provider import MusicProvider
 
+from .constants import (
+    ALL_FAVORITE_TRACKS,
+    BUILTIN_PLAYLISTS,
+    BUILTIN_PLAYLISTS_ENTRIES,
+    COLLAGE_IMAGE_PLAYLISTS,
+    CONF_ENTRY_LIBRARY_SYNC_BACK_HIDDEN,
+    CONF_ENTRY_LIBRARY_SYNC_PLAYLISTS_HIDDEN,
+    CONF_ENTRY_LIBRARY_SYNC_RADIOS_HIDDEN,
+    CONF_ENTRY_LIBRARY_SYNC_TRACKS_HIDDEN,
+    CONF_ENTRY_PROVIDER_SYNC_INTERVAL_PLAYLISTS_MOD,
+    CONF_ENTRY_PROVIDER_SYNC_INTERVAL_RADIOS_HIDDEN,
+    CONF_ENTRY_PROVIDER_SYNC_INTERVAL_TRACKS_HIDDEN,
+    CONF_KEY_PLAYLISTS,
+    CONF_KEY_RADIOS,
+    CONF_KEY_TRACKS,
+    DEFAULT_FANART,
+    DEFAULT_THUMB,
+    RANDOM_ALBUM,
+    RANDOM_ARTIST,
+    RANDOM_TRACKS,
+    RECENTLY_ADDED_TRACKS,
+    RECENTLY_PLAYED,
+    StoredItem,
+)
+
 if TYPE_CHECKING:
-    from music_assistant_models.config_entries import ConfigValueType, ProviderConfig
+    from music_assistant_models.config_entries import ConfigEntry, ConfigValueType, ProviderConfig
     from music_assistant_models.provider import ProviderManifest
 
     from music_assistant.mass import MusicAssistant
     from music_assistant.models import ProviderInstanceType
 
-
-class StoredItem(TypedDict):
-    """Definition of an media item (for the builtin provider) stored in persistent storage."""
-
-    item_id: str  # url or (locally accessible) file path (or id in case of playlist)
-    name: str
-    image_url: NotRequired[str]
-    last_updated: NotRequired[int]
+CACHE_CATEGORY_MEDIA_INFO: Final[int] = 1
+CACHE_CATEGORY_PLAYLISTS: Final[int] = 2
 
 
-CONF_KEY_RADIOS = "stored_radios"
-CONF_KEY_TRACKS = "stored_tracks"
-CONF_KEY_PLAYLISTS = "stored_playlists"
-
-
-ALL_FAVORITE_TRACKS = "all_favorite_tracks"
-RANDOM_ARTIST = "random_artist"
-RANDOM_ALBUM = "random_album"
-RANDOM_TRACKS = "random_tracks"
-RECENTLY_PLAYED = "recently_played"
-
-BUILTIN_PLAYLISTS = {
-    ALL_FAVORITE_TRACKS: "All favorited tracks",
-    RANDOM_ARTIST: "Random Artist (from library)",
-    RANDOM_ALBUM: "Random Album (from library)",
-    RANDOM_TRACKS: "500 Random tracks (from library)",
-    RECENTLY_PLAYED: "Recently played tracks",
+SUPPORTED_FEATURES = {
+    ProviderFeature.BROWSE,
+    ProviderFeature.LIBRARY_TRACKS,
+    ProviderFeature.LIBRARY_RADIOS,
+    ProviderFeature.LIBRARY_PLAYLISTS,
+    ProviderFeature.LIBRARY_TRACKS_EDIT,
+    ProviderFeature.LIBRARY_RADIOS_EDIT,
+    ProviderFeature.LIBRARY_PLAYLISTS_EDIT,
+    ProviderFeature.PLAYLIST_CREATE,
+    ProviderFeature.PLAYLIST_TRACKS_EDIT,
 }
-
-COLLAGE_IMAGE_PLAYLISTS = (ALL_FAVORITE_TRACKS, RANDOM_TRACKS)
-
-DEFAULT_THUMB = MediaItemImage(
-    type=ImageType.THUMB,
-    path="logo.png",
-    provider="builtin",
-    remotely_accessible=False,
-)
-
-DEFAULT_FANART = MediaItemImage(
-    type=ImageType.FANART,
-    path="fanart.jpg",
-    provider="builtin",
-    remotely_accessible=False,
-)
 
 
 async def setup(
     mass: MusicAssistant, manifest: ProviderManifest, config: ProviderConfig
 ) -> ProviderInstanceType:
     """Initialize provider(instance) with given configuration."""
-    return BuiltinProvider(mass, manifest, config)
+    return BuiltinProvider(mass, manifest, config, SUPPORTED_FEATURES)
 
 
 async def get_config_entries(
@@ -116,15 +111,16 @@ async def get_config_entries(
     action: [optional] action key called from config entries UI.
     values: the (intermediate) raw values for config entries sent with the action.
     """
-    return tuple(
-        ConfigEntry(
-            key=key,
-            type=ConfigEntryType.BOOLEAN,
-            label=name,
-            default_value=True,
-            category="builtin_playlists",
-        )
-        for key, name in BUILTIN_PLAYLISTS.items()
+    return (
+        *BUILTIN_PLAYLISTS_ENTRIES,
+        # hide some of the default (dynamic) entries for library management
+        CONF_ENTRY_LIBRARY_SYNC_TRACKS_HIDDEN,
+        CONF_ENTRY_LIBRARY_SYNC_PLAYLISTS_HIDDEN,
+        CONF_ENTRY_LIBRARY_SYNC_RADIOS_HIDDEN,
+        CONF_ENTRY_PROVIDER_SYNC_INTERVAL_TRACKS_HIDDEN,
+        CONF_ENTRY_PROVIDER_SYNC_INTERVAL_RADIOS_HIDDEN,
+        CONF_ENTRY_PROVIDER_SYNC_INTERVAL_PLAYLISTS_MOD,
+        CONF_ENTRY_LIBRARY_SYNC_BACK_HIDDEN,
     )
 
 
@@ -142,44 +138,15 @@ class BuiltinProvider(MusicProvider):
         if not await asyncio.to_thread(os.path.exists, self._playlists_dir):
             await asyncio.to_thread(os.mkdir, self._playlists_dir)
         await super().loaded_in_mass()
-        # migrate old image path from absolute to relative
-        # TODO: remove this after 2.5+ release
-        for old_path in (
-            "/usr/local/lib/python3.12/site-packages/music_assistant/server/helpers/resources/",
-            "/app/venv/lib/python3.12/site-packages/music_assistant/server/helpers/resources/",
-            "/Users/marcelvanderveldt/Workdir/music-assistant/core/music_assistant/server/helpers/resources/",
-        ):
-            query = (
-                "UPDATE playlists SET metadata = "
-                f"REPLACE (metadata, '{old_path}', '') "
-                f"WHERE playlists.metadata LIKE '%{old_path}%'"
-            )
-            if self.mass.music.database:
-                await self.mass.music.database.execute(query)
-                await self.mass.music.database.commit()
 
     @property
     def is_streaming_provider(self) -> bool:
         """Return True if the provider is a streaming provider."""
         return False
 
-    @property
-    def supported_features(self) -> set[ProviderFeature]:
-        """Return the features supported by this Provider."""
-        return {
-            ProviderFeature.BROWSE,
-            ProviderFeature.LIBRARY_TRACKS,
-            ProviderFeature.LIBRARY_RADIOS,
-            ProviderFeature.LIBRARY_PLAYLISTS,
-            ProviderFeature.LIBRARY_TRACKS_EDIT,
-            ProviderFeature.LIBRARY_RADIOS_EDIT,
-            ProviderFeature.PLAYLIST_CREATE,
-            ProviderFeature.PLAYLIST_TRACKS_EDIT,
-        }
-
     async def get_track(self, prov_track_id: str) -> Track:
         """Get full track details by id."""
-        parsed_item = cast(Track, await self.parse_item(prov_track_id))
+        parsed_item = cast("Track", await self.parse_item(prov_track_id))
         stored_items: list[StoredItem] = self.mass.config.get(CONF_KEY_TRACKS, [])
         if stored_item := next((x for x in stored_items if x["item_id"] == prov_track_id), None):
             # always prefer the stored info, such as the name
@@ -249,7 +216,6 @@ class BuiltinProvider(MusicProvider):
                 },
                 owner="Music Assistant",
                 is_editable=False,
-                cache_checksum=str(int(time.time())),
                 metadata=MediaItemMetadata(
                     images=UniqueList([DEFAULT_THUMB])
                     if prov_playlist_id in COLLAGE_IMAGE_PLAYLISTS
@@ -275,7 +241,6 @@ class BuiltinProvider(MusicProvider):
             owner="Music Assistant",
             is_editable=True,
         )
-        playlist.cache_checksum = str(stored_item.get("last_updated"))
         if image_url := stored_item.get("image_url"):
             playlist.metadata.add_image(
                 MediaItemImage(
@@ -332,7 +297,7 @@ class BuiltinProvider(MusicProvider):
                 self.logger.warning("Radio station %s not found: %s", item, err)
                 yield Radio(
                     item_id=item["item_id"],
-                    provider=self.lookup_key,
+                    provider=self.instance_id,
                     name=item["name"],
                     provider_mappings={
                         ProviderMapping(
@@ -378,6 +343,11 @@ class BuiltinProvider(MusicProvider):
         elif media_type == MediaType.PLAYLIST:
             # manually added (multi provider) playlist removal
             key = CONF_KEY_PLAYLISTS
+            # also delete the playlist file if it exists
+            playlist_file = os.path.join(self._playlists_dir, prov_item_id)
+            if await asyncio.to_thread(os.path.isfile, playlist_file):
+                async with self._playlist_lock:
+                    await asyncio.to_thread(os.remove, playlist_file)
         else:
             return False
         stored_items: list[StoredItem] = self.mass.config.get(key, [])
@@ -533,11 +503,9 @@ class BuiltinProvider(MusicProvider):
 
     async def _get_media_info(self, url: str, force_refresh: bool = False) -> AudioTags:
         """Retrieve mediainfo for url."""
-        cache_category = CACHE_CATEGORY_MEDIA_INFO
-        cache_base_key = self.lookup_key
         # do we have some cached info for this url ?
         cached_info = await self.mass.cache.get(
-            url, category=cache_category, base_key=cache_base_key
+            url, provider=self.instance_id, category=CACHE_CATEGORY_MEDIA_INFO
         )
         if cached_info and not force_refresh:
             return AudioTags.parse(cached_info)
@@ -546,7 +514,7 @@ class BuiltinProvider(MusicProvider):
         if "authSig" in url:
             media_info.has_cover_image = False
         await self.mass.cache.set(
-            url, media_info.raw, category=cache_category, base_key=cache_base_key
+            url, media_info.raw, provider=self.instance_id, category=CACHE_CATEGORY_MEDIA_INFO
         )
         return media_info
 
@@ -570,6 +538,7 @@ class BuiltinProvider(MusicProvider):
             allow_seek=not is_radio,
         )
 
+    @use_cache(expiration=120, category=CACHE_CATEGORY_PLAYLISTS)
     async def _get_builtin_playlist_random_favorite_tracks(self) -> list[Track]:
         result: list[Track] = []
         res = await self.mass.music.tracks.library_items(
@@ -580,6 +549,7 @@ class BuiltinProvider(MusicProvider):
             result.append(item)
         return result
 
+    @use_cache(expiration=120, category=CACHE_CATEGORY_PLAYLISTS)
     async def _get_builtin_playlist_random_tracks(self) -> list[Track]:
         result: list[Track] = []
         res = await self.mass.music.tracks.library_items(limit=500, order_by="random_play_count")
@@ -588,23 +558,24 @@ class BuiltinProvider(MusicProvider):
             result.append(item)
         return result
 
-    async def _get_builtin_playlist_random_album(self) -> UniqueList[Track]:
-        for in_library_only in (True, False):
-            for min_tracks_required in (10, 5, 1):
-                for random_album in await self.mass.music.albums.library_items(
-                    limit=25, order_by="random"
-                ):
-                    tracks = await self.mass.music.albums.tracks(
-                        random_album.item_id, random_album.provider, in_library_only=in_library_only
-                    )
-                    if len(tracks) < min_tracks_required:
-                        continue
-                    for idx, track in enumerate(tracks, 1):
-                        track.position = idx
-                    return tracks
-        return UniqueList()
+    @use_cache(expiration=3600, category=CACHE_CATEGORY_PLAYLISTS)
+    async def _get_builtin_playlist_random_album(self) -> list[Track]:
+        for random_album in await self.mass.music.albums.get_library_items_by_query(
+            limit=1,
+            order_by="random",
+            extra_query_parts=["album_type != :excluded_album_type"],
+            extra_query_params={"excluded_album_type": "single"},
+        ):
+            tracks = await self.mass.music.albums.tracks(
+                random_album.item_id, random_album.provider
+            )
+            for idx, track in enumerate(tracks, 1):
+                track.position = idx
+            return tracks
+        return []
 
-    async def _get_builtin_playlist_random_artist(self) -> UniqueList[Track]:
+    @use_cache(expiration=3600, category=CACHE_CATEGORY_PLAYLISTS)
+    async def _get_builtin_playlist_random_artist(self) -> list[Track]:
         for in_library_only in (True, False):
             for min_tracks_required in (25, 10, 5, 1):
                 for random_artist in await self.mass.music.artists.library_items(
@@ -620,8 +591,9 @@ class BuiltinProvider(MusicProvider):
                     for idx, track in enumerate(tracks, 1):
                         track.position = idx
                     return tracks
-        return UniqueList()
+        return []
 
+    @use_cache(expiration=30, category=CACHE_CATEGORY_PLAYLISTS)
     async def _get_builtin_playlist_recently_played(self) -> list[Track]:
         result: list[Track] = []
         recent_tracks = await self.mass.music.recently_played(100, [MediaType.TRACK])
@@ -646,6 +618,15 @@ class BuiltinProvider(MusicProvider):
             result.append(track)
         return result
 
+    @use_cache(expiration=60, category=CACHE_CATEGORY_PLAYLISTS)
+    async def _get_builtin_playlist_recently_added_tracks(self) -> list[Track]:
+        result: list[Track] = []
+        recent_tracks = await self.mass.music.recently_added_tracks(100)
+        for idx, track in enumerate(recent_tracks, 1):
+            track.position = idx
+            result.append(track)
+        return result
+
     async def _get_builtin_playlist_tracks(
         self, builtin_playlist_id: str
     ) -> list[Track] | UniqueList[Track]:
@@ -657,6 +638,7 @@ class BuiltinProvider(MusicProvider):
                 RANDOM_ALBUM: self._get_builtin_playlist_random_album,
                 RANDOM_ARTIST: self._get_builtin_playlist_random_artist,
                 RECENTLY_PLAYED: self._get_builtin_playlist_recently_played,
+                RECENTLY_ADDED_TRACKS: self._get_builtin_playlist_recently_added_tracks,
             }[builtin_playlist_id]()
         except KeyError:
             raise MediaNotFoundError(f"No built in playlist: {builtin_playlist_id}")

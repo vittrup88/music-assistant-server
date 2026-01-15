@@ -19,6 +19,7 @@
         'version': '',
       }),
     ]),
+    'date_added': None,
     'external_ids': list([
       list([
         'musicbrainz_albumid',
@@ -39,6 +40,7 @@
       'description': None,
       'explicit': None,
       'genres': None,
+      'grouping': None,
       'images': list([
         dict({
           'path': 'http://localhost:1234/Items/70b7288088b42d318f75dbcc41fd0091/Images/Primary?api_key=ACCESS_TOKEN',
@@ -51,6 +53,7 @@
       'languages': None,
       'last_refresh': None,
       'links': None,
+      'lrc_lyrics': None,
       'lyrics': None,
       'mood': None,
       'performers': None,
@@ -76,6 +79,8 @@
         }),
         'available': True,
         'details': None,
+        'in_library': None,
+        'is_unique': None,
         'item_id': '70b7288088b42d318f75dbcc41fd0091',
         'provider_domain': 'jellyfin',
         'provider_instance': 'xx-instance-id-xx',
@@ -109,6 +114,7 @@
         'version': '',
       }),
     ]),
+    'date_added': None,
     'external_ids': list([
       list([
         'musicbrainz_albumid',
@@ -129,6 +135,7 @@
       'description': None,
       'explicit': None,
       'genres': None,
+      'grouping': None,
       'images': list([
         dict({
           'path': 'http://localhost:1234/Items/32ed6a0091733dcff57eae67010f3d4b/Images/Primary?api_key=ACCESS_TOKEN',
@@ -141,6 +148,7 @@
       'languages': None,
       'last_refresh': None,
       'links': None,
+      'lrc_lyrics': None,
       'lyrics': None,
       'mood': None,
       'performers': None,
@@ -166,6 +174,8 @@
         }),
         'available': True,
         'details': None,
+        'in_library': None,
+        'is_unique': None,
         'item_id': '32ed6a0091733dcff57eae67010f3d4b',
         'provider_domain': 'jellyfin',
         'provider_instance': 'xx-instance-id-xx',
@@ -199,6 +209,7 @@
         'version': '',
       }),
     ]),
+    'date_added': None,
     'external_ids': list([
     ]),
     'favorite': False,
@@ -211,12 +222,14 @@
       'description': None,
       'explicit': None,
       'genres': None,
+      'grouping': None,
       'images': list([
       ]),
       'label': None,
       'languages': None,
       'last_refresh': None,
       'links': None,
+      'lrc_lyrics': None,
       'lyrics': None,
       'mood': None,
       'performers': None,
@@ -242,6 +255,8 @@
         }),
         'available': True,
         'details': None,
+        'in_library': None,
+        'is_unique': None,
         'item_id': '7c8d0bd55291c7fc0451d17ebef30017',
         'provider_domain': 'jellyfin',
         'provider_instance': 'xx-instance-id-xx',
@@ -257,6 +272,7 @@
 # ---
 # name: test_parse_artists[ash]
   dict({
+    'date_added': None,
     'external_ids': list([
       list([
         'musicbrainz_artistid',
@@ -273,6 +289,7 @@
       'description': None,
       'explicit': None,
       'genres': None,
+      'grouping': None,
       'images': list([
         dict({
           'path': 'http://localhost:1234/Items/dd954bbf54398e247d803186d3585b79/Images/Backdrop/0?api_key=ACCESS_TOKEN',
@@ -297,6 +314,7 @@
       'languages': None,
       'last_refresh': None,
       'links': None,
+      'lrc_lyrics': None,
       'lyrics': None,
       'mood': None,
       'performers': None,
@@ -322,6 +340,8 @@
         }),
         'available': True,
         'details': None,
+        'in_library': None,
+        'is_unique': None,
         'item_id': 'dd954bbf54398e247d803186d3585b79',
         'provider_domain': 'jellyfin',
         'provider_instance': 'xx-instance-id-xx',
@@ -368,6 +388,7 @@
         'version': '',
       }),
     ]),
+    'date_added': None,
     'disc_number': 1,
     'duration': 272,
     'external_ids': list([
@@ -375,6 +396,7 @@
     'favorite': False,
     'is_playable': True,
     'item_id': 'da9c458e425584680765ddc3a89cbc0c',
+    'last_played': 0,
     'media_type': 'track',
     'metadata': dict({
       'chapters': None,
@@ -382,6 +404,7 @@
       'description': None,
       'explicit': None,
       'genres': None,
+      'grouping': None,
       'images': list([
         dict({
           'path': 'http://localhost:1234/Items/da9c458e425584680765ddc3a89cbc0c/Images/Primary?api_key=ACCESS_TOKEN',
@@ -394,6 +417,7 @@
       'languages': None,
       'last_refresh': None,
       'links': None,
+      'lrc_lyrics': None,
       'lyrics': None,
       'mood': None,
       'performers': None,
@@ -419,6 +443,8 @@
         }),
         'available': True,
         'details': None,
+        'in_library': None,
+        'is_unique': None,
         'item_id': 'da9c458e425584680765ddc3a89cbc0c',
         'provider_domain': 'jellyfin',
         'provider_instance': 'xx-instance-id-xx',
@@ -466,6 +492,7 @@
         'version': '',
       }),
     ]),
+    'date_added': None,
     'disc_number': 0,
     'duration': 577,
     'external_ids': list([
@@ -473,6 +500,7 @@
     'favorite': False,
     'is_playable': True,
     'item_id': 'b5319fb11cde39fca2023184fcfa9862',
+    'last_played': 0,
     'media_type': 'track',
     'metadata': dict({
       'chapters': None,
@@ -480,12 +508,14 @@
       'description': None,
       'explicit': None,
       'genres': None,
+      'grouping': None,
       'images': list([
       ]),
       'label': None,
       'languages': None,
       'last_refresh': None,
       'links': None,
+      'lrc_lyrics': None,
       'lyrics': None,
       'mood': None,
       'performers': None,
@@ -511,6 +541,8 @@
         }),
         'available': True,
         'details': None,
+        'in_library': None,
+        'is_unique': None,
         'item_id': 'b5319fb11cde39fca2023184fcfa9862',
         'provider_domain': 'jellyfin',
         'provider_instance': 'xx-instance-id-xx',
@@ -544,6 +576,7 @@
         'version': '',
       }),
     ]),
+    'date_added': None,
     'disc_number': 1,
     'duration': 246,
     'external_ids': list([
@@ -551,6 +584,7 @@
     'favorite': False,
     'is_playable': True,
     'item_id': '54918f75ee8f6c8b8dc5efd680644f29',
+    'last_played': 0,
     'media_type': 'track',
     'metadata': dict({
       'chapters': None,
@@ -558,6 +592,7 @@
       'description': None,
       'explicit': None,
       'genres': None,
+      'grouping': None,
       'images': list([
         dict({
           'path': 'http://localhost:1234/Items/54918f75ee8f6c8b8dc5efd680644f29/Images/Primary?api_key=ACCESS_TOKEN',
@@ -570,6 +605,7 @@
       'languages': None,
       'last_refresh': None,
       'links': None,
+      'lrc_lyrics': None,
       'lyrics': None,
       'mood': None,
       'performers': None,
@@ -579,7 +615,7 @@
       'review': None,
       'style': None,
     }),
-    'name': 'Where the Bands Are (2018 Version)',
+    'name': 'Where the Bands Are',
     'position': 1,
     'provider': 'xx-instance-id-xx',
     'provider_mappings': list([
@@ -595,17 +631,19 @@
         }),
         'available': True,
         'details': None,
+        'in_library': None,
+        'is_unique': None,
         'item_id': '54918f75ee8f6c8b8dc5efd680644f29',
         'provider_domain': 'jellyfin',
         'provider_instance': 'xx-instance-id-xx',
         'url': 'http://localhost:1234/Audio/54918f75ee8f6c8b8dc5efd680644f29/universal?userId=USER_ID&deviceId=X&maxStreamingBitrate=140000000&api_key=ACCESS_TOKEN',
       }),
     ]),
-    'sort_name': 'where the bands are (2018 version)',
+    'sort_name': 'where the bands are',
     'track_number': 1,
     'translation_key': None,
     'uri': 'xx-instance-id-xx://track/54918f75ee8f6c8b8dc5efd680644f29',
-    'version': '',
+    'version': '2018 Version',
   })
 # ---
 # name: test_parse_tracks[zombie_christmas]
@@ -657,6 +695,7 @@
         'version': '',
       }),
     ]),
+    'date_added': None,
     'disc_number': 1,
     'duration': 224,
     'external_ids': list([
@@ -668,6 +707,7 @@
     'favorite': False,
     'is_playable': True,
     'item_id': 'fb12a77f49616a9fc56a6fab2b94174c',
+    'last_played': 0,
     'media_type': 'track',
     'metadata': dict({
       'chapters': None,
@@ -675,6 +715,7 @@
       'description': None,
       'explicit': None,
       'genres': None,
+      'grouping': None,
       'images': list([
         dict({
           'path': 'http://localhost:1234/Items/fb12a77f49616a9fc56a6fab2b94174c/Images/Primary?api_key=ACCESS_TOKEN',
@@ -687,6 +728,7 @@
       'languages': None,
       'last_refresh': None,
       'links': None,
+      'lrc_lyrics': None,
       'lyrics': None,
       'mood': None,
       'performers': None,
@@ -712,6 +754,8 @@
         }),
         'available': True,
         'details': None,
+        'in_library': None,
+        'is_unique': None,
         'item_id': 'fb12a77f49616a9fc56a6fab2b94174c',
         'provider_domain': 'jellyfin',
         'provider_instance': 'xx-instance-id-xx',

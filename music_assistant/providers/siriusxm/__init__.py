@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncGenerator, Awaitable, Sequence
-from typing import TYPE_CHECKING, Any, cast
+from collections.abc import AsyncGenerator, Sequence
+from typing import TYPE_CHECKING, Any
 
 from music_assistant_models.config_entries import ConfigEntry, ConfigValueOption, ConfigValueType
 from music_assistant_models.enums import (
@@ -18,15 +18,19 @@ from music_assistant_models.enums import (
 from music_assistant_models.errors import LoginFailed, MediaNotFoundError
 from music_assistant_models.media_items import (
     AudioFormat,
+    BrowseFolder,
+    ItemMapping,
     MediaItemImage,
     MediaItemLink,
-    MediaItemTypeOrItemMapping,
+    MediaItemType,
     ProviderMapping,
     Radio,
+    UniqueList,
 )
 from music_assistant_models.streamdetails import StreamDetails
 from tenacity import RetryError
 
+from music_assistant.controllers.cache import use_cache
 from music_assistant.helpers.util import select_free_port
 from music_assistant.helpers.webserver import Webserver
 from music_assistant.models.music_provider import MusicProvider
@@ -46,12 +50,17 @@ CONF_SXM_USERNAME = "sxm_email_address"
 CONF_SXM_PASSWORD = "sxm_password"
 CONF_SXM_REGION = "sxm_region"
 
+SUPPORTED_FEATURES = {
+    ProviderFeature.BROWSE,
+    ProviderFeature.LIBRARY_RADIOS,
+}
+
 
 async def setup(
     mass: MusicAssistant, manifest: ProviderManifest, config: ProviderConfig
 ) -> ProviderInstanceType:
     """Initialize provider(instance) with given configuration."""
-    return SiriusXMProvider(mass, manifest, config)
+    return SiriusXMProvider(mass, manifest, config, SUPPORTED_FEATURES)
 
 
 async def get_config_entries(
@@ -110,18 +119,12 @@ class SiriusXMProvider(MusicProvider):
 
     _current_stream_details: StreamDetails | None = None
 
-    @property
-    def supported_features(self) -> set[ProviderFeature]:
-        """Return the features supported by this Provider."""
-        return {
-            ProviderFeature.BROWSE,
-            ProviderFeature.LIBRARY_RADIOS,
-        }
-
     async def handle_async_init(self) -> None:
         """Handle async initialization of the provider."""
-        username: str = self.config.get_value(CONF_SXM_USERNAME)
-        password: str = self.config.get_value(CONF_SXM_PASSWORD)
+        username = self.config.get_value(CONF_SXM_USERNAME)
+        assert isinstance(username, str)  # for type checker
+        password = self.config.get_value(CONF_SXM_PASSWORD)
+        assert isinstance(password, str)  # for type checker
 
         region: RegionChoice = (
             RegionChoice.US if self.config.get_value(CONF_SXM_REGION) == "US" else RegionChoice.CA
@@ -168,7 +171,7 @@ class SiriusXMProvider(MusicProvider):
             bind_port=bind_port,
             base_url=self._base_url,
             static_routes=[
-                ("*", "/{tail:.*}", cast(Awaitable, http_handler)),
+                ("*", "/{tail:.*}", http_handler),
             ],
         )
 
@@ -203,7 +206,8 @@ class SiriusXMProvider(MusicProvider):
             if channel.is_favorite:
                 yield self._parse_radio(channel)
 
-    async def get_radio(self, prov_radio_id: str) -> Radio:  # type: ignore[return]
+    @use_cache(3600 * 24 * 14)  # Cache for 14 days
+    async def get_radio(self, prov_radio_id: str) -> Radio:
         """Get full radio details by id."""
         if prov_radio_id not in self._channels_by_id:
             raise MediaNotFoundError("Station not found")
@@ -229,7 +233,7 @@ class SiriusXMProvider(MusicProvider):
         # See `_channel_updated` for where this is handled.
         self._current_stream_details = StreamDetails(
             item_id=item_id,
-            provider=self.lookup_key,
+            provider=self.instance_id,
             audio_format=AudioFormat(
                 content_type=ContentType.AAC,
             ),
@@ -242,7 +246,8 @@ class SiriusXMProvider(MusicProvider):
 
         return self._current_stream_details
 
-    async def browse(self, path: str) -> Sequence[MediaItemTypeOrItemMapping]:
+    @use_cache(3600 * 3)  # Cache for 3 hours
+    async def browse(self, path: str) -> Sequence[MediaItemType | ItemMapping | BrowseFolder]:
         """Browse this provider's items.
 
         :param path: The path to browse, (e.g. provider_id://artists).
@@ -254,6 +259,10 @@ class SiriusXMProvider(MusicProvider):
         live_data = XMLiveChannel.from_dict(live_channel_raw)
 
         self.logger.debug(f"Got update for SiriusXM channel {live_data.id}")
+
+        if self._current_stream_details is None:
+            return
+
         current_channel = self._current_stream_details.item_id
 
         if live_data.id != current_channel:
@@ -283,7 +292,7 @@ class SiriusXMProvider(MusicProvider):
 
     def _parse_radio(self, channel: XMChannel) -> Radio:
         radio = Radio(
-            provider=self.lookup_key,
+            provider=self.instance_id,
             item_id=channel.id,
             name=channel.name,
             provider_mappings={
@@ -305,7 +314,7 @@ class SiriusXMProvider(MusicProvider):
         if icon is not None:
             images.append(
                 MediaItemImage(
-                    provider=self.lookup_key,
+                    provider=self.instance_id,
                     type=ImageType.THUMB,
                     path=icon,
                     remotely_accessible=True,
@@ -313,7 +322,7 @@ class SiriusXMProvider(MusicProvider):
             )
             images.append(
                 MediaItemImage(
-                    provider=self.lookup_key,
+                    provider=self.instance_id,
                     type=ImageType.LOGO,
                     path=icon,
                     remotely_accessible=True,
@@ -323,7 +332,7 @@ class SiriusXMProvider(MusicProvider):
         if banner is not None:
             images.append(
                 MediaItemImage(
-                    provider=self.lookup_key,
+                    provider=self.instance_id,
                     type=ImageType.BANNER,
                     path=banner,
                     remotely_accessible=True,
@@ -331,17 +340,17 @@ class SiriusXMProvider(MusicProvider):
             )
             images.append(
                 MediaItemImage(
-                    provider=self.lookup_key,
+                    provider=self.instance_id,
                     type=ImageType.LANDSCAPE,
                     path=banner,
                     remotely_accessible=True,
                 )
             )
 
-        radio.metadata.images = images
-        radio.metadata.links = [MediaItemLink(type=LinkType.WEBSITE, url=channel.url)]
+        radio.metadata.images = UniqueList(images) if images else None
+        radio.metadata.links = {MediaItemLink(type=LinkType.WEBSITE, url=channel.url)}
         radio.metadata.description = channel.medium_description
         radio.metadata.explicit = bool(channel.is_mature)
-        radio.metadata.genres = [cat.name for cat in channel.categories]
+        radio.metadata.genres = {cat.name for cat in channel.categories}
 
         return radio

@@ -88,7 +88,7 @@ async def setup(
     mass: MusicAssistant, manifest: ProviderManifest, config: ProviderConfig
 ) -> ProviderInstanceType:
     """Initialize provider(instance) with given configuration."""
-    return AudioDbMetadataProvider(mass, manifest, config)
+    return AudioDbMetadataProvider(mass, manifest, config, SUPPORTED_FEATURES)
 
 
 async def get_config_entries(
@@ -142,11 +142,6 @@ class AudioDbMetadataProvider(MetadataProvider):
         """Handle async initialization of the provider."""
         self.cache = self.mass.cache
         self.throttler = Throttler(rate_limit=1, period=1)
-
-    @property
-    def supported_features(self) -> set[ProviderFeature]:
-        """Return the features supported by this Provider."""
-        return SUPPORTED_FEATURES
 
     async def get_artist_metadata(self, artist: Artist) -> MediaItemMetadata | None:
         """Retrieve metadata for artist on theaudiodb."""
@@ -212,14 +207,14 @@ class AudioDbMetadataProvider(MetadataProvider):
                             continue
                     elif not compare_strings(track_artist.name, item["strArtist"]):
                         continue
-                    if (  # noqa: SIM114
+                    if (
                         track.album
                         and (mb_rgid := track.album.get_external_id(ExternalID.MB_RELEASEGROUP))
                         # AudioDb swapped MB Album ID and ReleaseGroup ID ?!
                         and mb_rgid != item["strMusicBrainzAlbumID"]
                     ):
                         continue
-                    elif track.album and not compare_strings(
+                    if track.album and not compare_strings(
                         track.album.name, item["strAlbum"], strict=False
                     ):
                         continue
@@ -261,7 +256,7 @@ class AudioDbMetadataProvider(MetadataProvider):
                         MediaItemImage(
                             type=img_type,
                             path=img,
-                            provider=self.lookup_key,
+                            provider=self.instance_id,
                             remotely_accessible=True,
                         )
                     )
@@ -309,7 +304,7 @@ class AudioDbMetadataProvider(MetadataProvider):
                         MediaItemImage(
                             type=img_type,
                             path=img,
-                            provider=self.lookup_key,
+                            provider=self.instance_id,
                             remotely_accessible=True,
                         )
                     )
@@ -319,7 +314,7 @@ class AudioDbMetadataProvider(MetadataProvider):
         if not album.year:
             album.year = int(adb_album.get("intYearReleased", "0"))
         if album.album_type == AlbumType.UNKNOWN and adb_album.get("strReleaseFormat"):
-            releaseformat = cast(str, adb_album.get("strReleaseFormat"))
+            releaseformat = cast("str", adb_album.get("strReleaseFormat"))
             album.album_type = ALBUMTYPE_MAPPING.get(releaseformat, AlbumType.UNKNOWN)
         # update the artist mbid while at it
         for album_artist in album.artists:
@@ -363,7 +358,7 @@ class AudioDbMetadataProvider(MetadataProvider):
                         MediaItemImage(
                             type=img_type,
                             path=img,
-                            provider=self.lookup_key,
+                            provider=self.instance_id,
                             remotely_accessible=True,
                         )
                     )
@@ -394,7 +389,7 @@ class AudioDbMetadataProvider(MetadataProvider):
             await self.mass.music.albums.update_item_in_library(track.album.item_id, track.album)
         return metadata
 
-    @use_cache(86400 * 30)
+    @use_cache(86400 * 90, persistent=True)  # Cache for 90 days
     async def _get_data(self, endpoint: str, **kwargs: Any) -> dict[str, Any] | None:
         """Get data from api."""
         url = f"https://theaudiodb.com/api/v1/json/{app_var(3)}/{endpoint}"
@@ -403,7 +398,7 @@ class AudioDbMetadataProvider(MetadataProvider):
             self.mass.http_session.get(url, params=kwargs, ssl=False) as response,
         ):
             try:
-                result = cast(dict[str, Any], await response.json())
+                result = cast("dict[str, Any]", await response.json())
             except (
                 aiohttp.client_exceptions.ContentTypeError,
                 JSONDecodeError,

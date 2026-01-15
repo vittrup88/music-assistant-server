@@ -3,13 +3,11 @@
 from __future__ import annotations
 
 from collections.abc import AsyncGenerator
-from io import BytesIO
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import aiofiles
 import orjson
-import podcastparser
 from music_assistant_models.config_entries import ConfigEntry, ConfigValueOption
 from music_assistant_models.enums import (
     ConfigEntryType,
@@ -26,15 +24,26 @@ from music_assistant_models.media_items import (
     Podcast,
     PodcastEpisode,
     ProviderMapping,
+    RecommendationFolder,
     SearchResults,
     UniqueList,
 )
 from music_assistant_models.streamdetails import StreamDetails
 
-from music_assistant.helpers.podcast_parsers import parse_podcast, parse_podcast_episode
+from music_assistant.controllers.cache import use_cache
+from music_assistant.helpers.podcast_parsers import (
+    get_podcastparser_dict,
+    parse_podcast,
+    parse_podcast_episode,
+)
 from music_assistant.helpers.throttle_retry import ThrottlerManager, throttle_with_retries
 from music_assistant.models.music_provider import MusicProvider
-from music_assistant.providers.itunes_podcasts.schema import ITunesSearchResults
+from music_assistant.providers.itunes_podcasts.schema import (
+    ITunesSearchResults,
+    PodcastSearchResult,
+    TopPodcastsHelper,
+    TopPodcastsResponse,
+)
 
 if TYPE_CHECKING:
     from music_assistant_models.config_entries import ConfigValueType, ProviderConfig
@@ -49,13 +58,17 @@ CONF_EXPLICIT = "explicit"
 CONF_NUM_EPISODES = "num_episodes"
 
 CACHE_CATEGORY_PODCASTS = 0
+CACHE_CATEGORY_RECOMMENDATIONS = 1
+CACHE_KEY_TOP_PODCASTS = "top-podcasts"
+
+SUPPORTED_FEATURES = {ProviderFeature.SEARCH, ProviderFeature.RECOMMENDATIONS}
 
 
 async def setup(
     mass: MusicAssistant, manifest: ProviderManifest, config: ProviderConfig
 ) -> ProviderInstanceType:
     """Initialize provider(instance) with given configuration."""
-    return ITunesPodcastsProvider(mass, manifest, config)
+    return ITunesPodcastsProvider(mass, manifest, config, SUPPORTED_FEATURES)
 
 
 async def get_config_entries(
@@ -110,13 +123,6 @@ class ITunesPodcastsProvider(MusicProvider):
     throttler: ThrottlerManager
 
     @property
-    def supported_features(self) -> set[ProviderFeature]:
-        """Return the features supported by this Provider."""
-        return {
-            ProviderFeature.SEARCH,
-        }
-
-    @property
     def is_streaming_provider(self) -> bool:
         """Return True if the provider is a streaming provider."""
         # For streaming providers return True here but for local file based providers return False.
@@ -128,6 +134,7 @@ class ITunesPodcastsProvider(MusicProvider):
         # 20 requests per minute, be a bit below
         self.throttler = ThrottlerManager(rate_limit=18, period=60)
 
+    @use_cache(3600 * 24 * 7)  # Cache for 7 days
     async def search(
         self, search_query: str, media_types: list[MediaType], limit: int = 10
     ) -> SearchResults:
@@ -164,16 +171,23 @@ class ITunesPodcastsProvider(MusicProvider):
             json_response = await response.read()
         if not json_response:
             return []
-        podcast_list: list[Podcast] = []
         results = ITunesSearchResults.from_json(json_response).results
+        return self._get_podcast_list(results)
+
+    def _get_podcast_list(self, results: list[PodcastSearchResult]) -> list[Podcast]:
+        podcast_list: list[Podcast] = []
         for result in results:
             if result.feed_url is None or result.track_name is None:
+                self.logger.info(
+                    "The podcast '%s' does not have a feed url. Please see the docs for more info.",
+                    result.track_name,
+                )
                 continue
             podcast = Podcast(
                 name=result.track_name,
                 item_id=result.feed_url,
                 publisher=result.artist_name,
-                provider=self.lookup_key,
+                provider=self.instance_id,
                 provider_mappings={
                     ProviderMapping(
                         item_id=result.feed_url,
@@ -192,7 +206,7 @@ class ITunesPodcastsProvider(MusicProvider):
                 if artwork_url is not None:
                     image_list.append(
                         MediaItemImage(
-                            type=ImageType.THUMB, path=artwork_url, provider=self.lookup_key
+                            type=ImageType.THUMB, path=artwork_url, provider=self.instance_id
                         )
                     )
             podcast.metadata.images = UniqueList(image_list)
@@ -206,9 +220,8 @@ class ITunesPodcastsProvider(MusicProvider):
         return parse_podcast(
             feed_url=prov_podcast_id,
             parsed_feed=parsed,
-            lookup_key=self.lookup_key,
-            domain=self.domain,
             instance_id=self.instance_id,
+            domain=self.domain,
         )
 
     async def get_podcast_episodes(
@@ -219,39 +232,43 @@ class ITunesPodcastsProvider(MusicProvider):
         podcast_cover = podcast.get("cover_url")
         episodes = podcast.get("episodes", [])
         for cnt, episode in enumerate(episodes):
-            yield parse_podcast_episode(
+            if mass_episode := parse_podcast_episode(
                 episode=episode,
                 prov_podcast_id=prov_podcast_id,
                 episode_cnt=cnt,
                 podcast_cover=podcast_cover,
                 domain=self.domain,
-                lookup_key=self.lookup_key,
                 instance_id=self.instance_id,
-            )
+            ):
+                yield mass_episode
 
     async def get_podcast_episode(self, prov_episode_id: str) -> PodcastEpisode:
         """Get single podcast episode."""
-        prov_podcast_id, guid_or_stream_url = prov_episode_id.split(" ")
-        podcast = await self._cache_get_podcast(prov_podcast_id)
-        podcast_cover = podcast.get("cover_url")
-        episodes = podcast.get("episodes", [])
-        for cnt, episode in enumerate(episodes):
-            episode_enclosures = episode.get("enclosures", [])
-            if len(episode_enclosures) < 1:
-                raise RuntimeError
-            stream_url = episode_enclosures[0].get("url", None)
-            if guid_or_stream_url == episode.get("guid", stream_url):
-                return parse_podcast_episode(
-                    episode=episode,
-                    prov_podcast_id=prov_podcast_id,
-                    episode_cnt=cnt,
-                    podcast_cover=podcast_cover,
-                    domain=self.domain,
-                    lookup_key=self.lookup_key,
-                    instance_id=self.instance_id,
-                )
-
+        podcast_id, guid_or_stream_url = prov_episode_id.split(" ")
+        async for mass_episode in self.get_podcast_episodes(podcast_id):
+            _, _guid_or_stream_url = mass_episode.item_id.split(" ")
+            # this is enough, as internal
+            if guid_or_stream_url == _guid_or_stream_url:
+                return mass_episode
         raise MediaNotFoundError("Episode not found")
+
+    async def recommendations(self) -> list[RecommendationFolder]:
+        """Get recommendations.
+
+        This provider uses a list of top podcasts for the configured country.
+        """
+        search_results = await self._cache_get_top_podcasts()
+        podcast_list = self._get_podcast_list(search_results)
+        return [
+            RecommendationFolder(
+                item_id="itunes-top-podcasts",
+                name="",
+                icon="mdi-trending-up",
+                translation_key="trending_podcasts",
+                items=UniqueList(podcast_list),
+                provider=self.instance_id,
+            )
+        ]
 
     async def _get_episode_stream_url(self, podcast_id: str, guid_or_stream_url: str) -> str | None:
         podcast = await self._cache_get_podcast(podcast_id)
@@ -261,7 +278,12 @@ class ITunesPodcastsProvider(MusicProvider):
             if len(episode_enclosures) < 1:
                 raise MediaNotFoundError
             stream_url: str | None = episode_enclosures[0].get("url", None)
-            if guid_or_stream_url == episode.get("guid", stream_url):
+            guid = episode.get("guid")
+            if guid is not None and len(guid.split(" ")) == 1:
+                _guid_or_stream_url_compare = guid
+            else:
+                _guid_or_stream_url_compare = stream_url
+            if guid_or_stream_url == _guid_or_stream_url_compare:
                 return stream_url
         return None
 
@@ -272,7 +294,7 @@ class ITunesPodcastsProvider(MusicProvider):
         if stream_url is None:
             raise MediaNotFoundError
         return StreamDetails(
-            provider=self.lookup_key,
+            provider=self.instance_id,
             item_id=item_id,
             audio_format=AudioFormat(
                 content_type=ContentType.try_parse(stream_url),
@@ -284,24 +306,38 @@ class ITunesPodcastsProvider(MusicProvider):
             allow_seek=True,
         )
 
+    @throttle_with_retries
+    async def _get_podcast_search_result_from_itunes_id(
+        self, itunes_id: int
+    ) -> PodcastSearchResult:
+        params = {"id": itunes_id}
+        url = "https://itunes.apple.com/lookup?"
+        response = await self.mass.http_session.get(url, params=params)
+        json_response = b""
+        if response.status == 200:
+            json_response = await response.read()
+        if not json_response:
+            raise MediaNotFoundError
+        search_results = ITunesSearchResults.from_json(json_response)
+        if search_results.result_count == 0:
+            raise MediaNotFoundError
+        if search_results.result_count > 1:
+            self.logger.warning("More than a single result for podcast.")
+        return search_results.results[0]
+
     async def _cache_get_podcast(self, prov_podcast_id: str) -> dict[str, Any]:
         parsed_podcast = await self.mass.cache.get(
             key=prov_podcast_id,
-            base_key=self.lookup_key,
+            provider=self.instance_id,
             category=CACHE_CATEGORY_PODCASTS,
             default=None,
         )
         if parsed_podcast is None:
-            # see music-assistant/server@6aae82e
-            response = await self.mass.http_session.get(
-                prov_podcast_id, headers={"User-Agent": "Mozilla/5.0"}
-            )
-            if response.status != 200:
-                raise RuntimeError
-            feed_data = await response.read()
-            feed_stream = BytesIO(feed_data)
-            parsed_podcast = podcastparser.parse(
-                prov_podcast_id, feed_stream, max_episodes=self.max_episodes
+            # get_podcastparser_dict raises MediaNotFoundError if data is invalid
+            parsed_podcast = await get_podcastparser_dict(
+                session=self.mass.http_session,
+                feed_url=prov_podcast_id,
+                max_episodes=self.max_episodes,
             )
             await self._cache_set_podcast(feed_url=prov_podcast_id, parsed_podcast=parsed_podcast)
 
@@ -311,8 +347,68 @@ class ITunesPodcastsProvider(MusicProvider):
     async def _cache_set_podcast(self, feed_url: str, parsed_podcast: dict[str, Any]) -> None:
         await self.mass.cache.set(
             key=feed_url,
-            base_key=self.lookup_key,
+            provider=self.instance_id,
             category=CACHE_CATEGORY_PODCASTS,
             data=parsed_podcast,
             expiration=60 * 60 * 24,  # 1 day
         )
+
+    async def _cache_set_top_podcasts(self, top_podcast_helper: TopPodcastsHelper) -> None:
+        await self.mass.cache.set(
+            key=CACHE_KEY_TOP_PODCASTS,
+            provider=self.instance_id,
+            category=CACHE_CATEGORY_RECOMMENDATIONS,
+            data=top_podcast_helper.to_dict(),
+            expiration=60 * 60 * 6,  # 6 hours
+        )
+
+    async def _cache_get_top_podcasts(self) -> list[PodcastSearchResult]:
+        parsed_top_podcasts = await self.mass.cache.get(
+            key=CACHE_KEY_TOP_PODCASTS,
+            provider=self.instance_id,
+            category=CACHE_CATEGORY_RECOMMENDATIONS,
+        )
+        if parsed_top_podcasts is not None:
+            helper = TopPodcastsHelper.from_dict(parsed_top_podcasts)
+            return helper.top_podcasts
+
+        # 15 results
+        # keep 20 requests max per minute in mind
+        # https://rss.marketingtools.apple.com/
+        country = str(self.config.get_value(CONF_LOCALE))
+        url = f"https://rss.marketingtools.apple.com/api/v2/{country}/podcasts/top/15/podcasts.json"
+        response = await self.mass.http_session.get(url)
+        json_response = b""
+        if response.status == 200:
+            json_response = await response.read()
+        if not json_response:
+            return []
+
+        top_podcasts_response = TopPodcastsResponse.from_json(json_response)
+
+        if top_podcasts_response.feed is None:
+            return []
+
+        include_explicit = bool(self.config.get_value(CONF_EXPLICIT))
+
+        helper = TopPodcastsHelper()
+        for top_podcast in top_podcasts_response.feed.results:
+            if not include_explicit and top_podcast.content_advisory_rating is not None:
+                # the spelling within the API is wrong.
+                if top_podcast.content_advisory_rating in [
+                    "explicit",
+                    "Explicit",
+                    "Explict",
+                    "explict",
+                ]:
+                    continue
+            try:
+                podcast_search_result = await self._get_podcast_search_result_from_itunes_id(
+                    int(top_podcast.id_)
+                )
+            except MediaNotFoundError:
+                continue
+            helper.top_podcasts.append(podcast_search_result)
+
+        await self._cache_set_top_podcasts(top_podcast_helper=helper)
+        return helper.top_podcasts

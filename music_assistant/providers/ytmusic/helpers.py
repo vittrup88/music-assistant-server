@@ -12,6 +12,8 @@ from time import time
 
 import ytmusicapi
 
+from music_assistant.providers.ytmusic.constants import YTMRecommendationIcons
+
 
 async def get_artist(
     prov_artist_id: str, headers: dict[str, str], language: str = "en"
@@ -40,19 +42,39 @@ async def get_album(prov_album_id: str, language: str = "en") -> dict[str, str]:
 
     def _get_album():
         ytm = ytmusicapi.YTMusic(language=language)
+        album = ytm.get_album(browseId=prov_album_id)
+        if "audioPlaylistId" in album:
+            # Track id's from album tracks do not match with actual album tracks. E.g. a track
+            # points to the videoId of the original version, while we want the album version
+            album_playlist = ytm.get_playlist(playlistId=album["audioPlaylistId"], limit=None)
+            # Do some basic checks
+            if len(album_playlist.get("tracks", [])) != len(album.get("tracks", [])):
+                return album
+            # Move the correct track info to the album tracks
+            playlist_tracks_by_title = {t.get("title"): t for t in album_playlist.get("tracks", [])}
+            for album_track in album.get("tracks", []):
+                if playlist_track := playlist_tracks_by_title.get(album_track.get("title")):
+                    album_track["videoId"] = playlist_track["videoId"]
+                    album_track["isAvailable"] = playlist_track.get("isAvailable", True)
+                    album_track["likeStatus"] = playlist_track.get("likeStatus", "INDIFFERENT")
+            return album
         return ytm.get_album(browseId=prov_album_id)
 
     return await asyncio.to_thread(_get_album)
 
 
 async def get_playlist(
-    prov_playlist_id: str, headers: dict[str, str], language: str = "en", user: str | None = None
+    prov_playlist_id: str,
+    headers: dict[str, str],
+    language: str = "en",
+    user: str | None = None,
+    limit=None,
 ) -> dict[str, str]:
     """Async wrapper around the ytmusicapi get_playlist function."""
 
     def _get_playlist():
         ytm = ytmusicapi.YTMusic(auth=headers, language=language, user=user)
-        playlist = ytm.get_playlist(playlistId=prov_playlist_id, limit=None)
+        playlist = ytm.get_playlist(playlistId=prov_playlist_id, limit=limit)
         playlist["checksum"] = get_playlist_checksum(playlist)
         # Fix missing playlist id in some edge cases
         playlist["id"] = prov_playlist_id if not playlist.get("id") else playlist["id"]
@@ -85,6 +107,8 @@ async def get_track(
         track["thumbnails"] = track_obj["microformat"]["microformatDataRenderer"]["thumbnail"][
             "thumbnails"
         ]
+        if track_thumbs := track_obj["videoDetails"].get("thumbnail", {}).get("thumbnails"):
+            track["thumbnails"] = track.get("thumbnails", []) + track_thumbs
         track["isAvailable"] = track_obj["playabilityStatus"]["status"] == "OK"
         return track
 
@@ -351,3 +375,32 @@ def convert_to_netscape(raw_cookie_str: str, domain: str) -> str:
     for morsel in cookie.values():
         netscape_cookie += f"{domain}\tTRUE\t/\tTRUE\t0\t{morsel.key}\t{morsel.value}\n"
     return netscape_cookie
+
+
+async def get_home(
+    headers: dict[str, str], language: str = "en", user: str | None = None, limit: int = 3
+) -> dict[str, str]:
+    """Get the recommendations from the home page."""
+
+    def _get_home():
+        ytm = ytmusicapi.YTMusic(auth=headers, language=language, user=user)
+        return ytm.get_home(limit=limit)
+
+    return await asyncio.to_thread(_get_home)
+
+
+def determine_recommendation_icon(name: str) -> str:
+    """Determine the icon for a recommendation based on its name."""
+    query = name.lower()
+
+    if "listen again" in query:
+        return YTMRecommendationIcons.LISTEN_AGAIN
+    if "continue" in query:
+        return YTMRecommendationIcons.CONTINUE_WATCHING
+    if "your mix" in query:
+        return YTMRecommendationIcons.YOUR_MIX
+    if "new" in query:
+        return YTMRecommendationIcons.NEW_RELEASES
+    if "recommended" in query:
+        return YTMRecommendationIcons.RECOMMENDED
+    return YTMRecommendationIcons.DEFAULT
